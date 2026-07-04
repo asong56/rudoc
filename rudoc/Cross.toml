@@ -1,0 +1,19 @@
+# cross.toml — configuration for the `cross` cross-compilation tool
+# Install: cargo install cross
+# Usage:   cross build --release --target aarch64-unknown-linux-musl
+
+[build]
+# Use pre-built images from ghcr.io/cross-rs
+# No need for a custom Dockerfile for our pure-Rust codebase
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+
+[target.x86_64-pc-windows-gnu]
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:main"
+
+[target.armv7-unknown-linux-musleabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:main"
+
+[target.i686-unknown-linux-musl]
+image = "ghcr.io/cross-rs/i686-unknown-linux-musl:main"

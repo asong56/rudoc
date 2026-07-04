@@ -1,0 +1,212 @@
+use anyhow::{bail, Context, Result};
+use std::io::{Read, Write};
+use std::path::Path;
+
+use crate::detect::{Format, IrTier};
+use crate::error::RudocError;
+use crate::ir::slide::SlideIR;
+use crate::{readers, writers};
+
+/// All user-facing options that affect conversion.
+#[derive(Debug, Clone)]
+pub struct ConvertOptions {
+    pub from: Format,
+    pub to: Format,
+    pub standalone: bool,
+    pub slide_level: u8,
+    pub sheet_name: String,
+    pub pdf_paper: String,
+    pub pdf_font: String,
+    pub wrap: Option<usize>,
+    pub verbose: bool,
+    pub quiet: bool,
+}
+
+impl Default for ConvertOptions {
+    fn default() -> Self {
+        ConvertOptions {
+            from: Format::Markdown,
+            to: Format::Html,
+            standalone: false,
+            slide_level: 1,
+            sheet_name: "Sheet1".to_string(),
+            pdf_paper: "a4".to_string(),
+            pdf_font: "Arial".to_string(),
+            wrap: None,
+            verbose: false,
+            quiet: false,
+        }
+    }
+}
+
+/// Read input bytes, convert, write output bytes.
+pub fn convert(input: &[u8], opts: &ConvertOptions) -> Result<Vec<u8>> {
+    let from = opts.from;
+    let to = opts.to;
+
+    if opts.verbose {
+        eprintln!("[rudoc] {} → {}", from, to);
+    }
+
+    // ── md → pptx (special cross-tier path) ─────────────────────────
+    if from == Format::Markdown && to == Format::Pptx {
+        let src = std::str::from_utf8(input).context("Input is not valid UTF-8")?;
+        let doc = readers::markdown::parse(src)?;
+        let slides = SlideIR::from_doc(&doc, opts.slide_level);
+        if opts.verbose { eprintln!("[rudoc] {} slides generated", slides.slides.len()); }
+        let bytes = writers::pptx::render(&slides)?;
+        return Ok(bytes);
+    }
+
+    // Validate tier compatibility
+    let from_tier = from.ir_tier();
+    let to_tier = to.ir_tier();
+    if from_tier != to_tier {
+        return Err(RudocError::IncompatibleFormats { from, to }.into());
+    }
+
+    match from_tier {
+        IrTier::Doc => convert_doc(input, from, to, opts),
+        IrTier::Table => convert_table(input, from, to, opts),
+        IrTier::Tree => convert_tree(input, from, to, opts),
+        IrTier::Slide => bail!("Direct pptx → pptx conversion is a no-op"),
+    }
+}
+
+// ── Doc tier ─────────────────────────────────────────────────────────────
+
+fn convert_doc(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
+    // Read → DocIR
+    let doc = match from {
+        Format::Markdown => {
+            let src = std::str::from_utf8(input)?;
+            let mut doc = readers::markdown::parse(src)?;
+            if doc.metadata.title.is_none() {
+                doc.metadata.title = readers::markdown::extract_title(src);
+            }
+            doc
+        }
+        Format::Html => {
+            let src = std::str::from_utf8(input)?;
+            readers::html::parse(src)?
+        }
+        Format::Txt => {
+            let src = std::str::from_utf8(input)?;
+            readers::txt::parse(src)?
+        }
+        Format::Docx => readers::docx::parse(input)?,
+        Format::Typst => {
+            let src = std::str::from_utf8(input)?;
+            readers::typst_reader::parse(src)?
+        }
+        Format::Pdf => {
+            bail!("PDF reading (text extraction) is not yet implemented in this build.\nTip: use a .typ or .md source file instead.")
+        }
+        _ => bail!("Unexpected format in doc tier: {}", from),
+    };
+
+    if opts.verbose {
+        eprintln!("[rudoc] DocIR: {} blocks", doc.blocks.len());
+    }
+
+    // DocIR → output
+    match to {
+        Format::Markdown => {
+            let s = writers::markdown::render(&doc, opts.wrap.is_some());
+            Ok(s.into_bytes())
+        }
+        Format::Html => {
+            let s = writers::html::render(&doc, opts.standalone);
+            Ok(s.into_bytes())
+        }
+        Format::Txt => {
+            let s = writers::txt::render(&doc, opts.wrap);
+            Ok(s.into_bytes())
+        }
+        Format::Docx => writers::docx::render(&doc),
+        Format::Typst => {
+            let s = writers::typst_writer::render(&doc, &opts.pdf_paper, &opts.pdf_font);
+            Ok(s.into_bytes())
+        }
+        Format::Pdf => writers::pdf::render(&doc, &opts.pdf_paper, &opts.pdf_font),
+        _ => bail!("Unexpected format in doc tier: {}", to),
+    }
+}
+
+// ── Table tier ────────────────────────────────────────────────────────────
+
+fn convert_table(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
+    let table = match from {
+        Format::Csv => {
+            let src = std::str::from_utf8(input)?;
+            readers::csv::parse(src, &opts.sheet_name)?
+        }
+        Format::Xlsx => readers::xlsx::parse(input, None)?,
+        _ => bail!("Unexpected format in table tier: {}", from),
+    };
+
+    if opts.verbose {
+        eprintln!("[rudoc] TableIR: {} sheets, {} rows (first sheet)",
+            table.sheets.len(),
+            table.sheets.first().map(|s| s.rows.len()).unwrap_or(0));
+    }
+
+    match to {
+        Format::Csv => {
+            let s = writers::csv::render(&table)?;
+            Ok(s.into_bytes())
+        }
+        Format::Xlsx => writers::xlsx::render(&table),
+        _ => bail!("Unexpected format in table tier: {}", to),
+    }
+}
+
+// ── Tree tier ─────────────────────────────────────────────────────────────
+
+fn convert_tree(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
+    let src = std::str::from_utf8(input)?;
+    let tree = match from {
+        Format::Xml => readers::xml::parse(src)?,
+        Format::Opml => readers::opml::parse(src)?,
+        Format::Json => readers::json::parse(src)?,
+        _ => bail!("Unexpected format in tree tier: {}", from),
+    };
+
+    if opts.verbose {
+        eprintln!("[rudoc] TreeIR root: <{}>  {} children",
+            tree.tag, tree.children.len());
+    }
+
+    match to {
+        Format::Xml => {
+            let s = writers::xml::render(&tree, true)?;
+            Ok(s.into_bytes())
+        }
+        Format::Opml => {
+            let s = writers::opml::render(&tree)?;
+            Ok(s.into_bytes())
+        }
+        Format::Json => {
+            let s = writers::json::render(&tree, true)?;
+            Ok(s.into_bytes())
+        }
+        _ => bail!("Unexpected format in tree tier: {}", to),
+    }
+}
+
+/// Merge multiple DocIR inputs (for multi-file input).
+pub fn merge_docs(docs: Vec<crate::ir::doc::DocIR>) -> crate::ir::doc::DocIR {
+    use crate::ir::doc::{Block, DocIR};
+    let mut merged = DocIR::new();
+    // Use first document's metadata
+    if let Some(first) = docs.first() {
+        merged.metadata = first.metadata.clone();
+    }
+    for (i, mut doc) in docs.into_iter().enumerate() {
+        if i > 0 {
+            merged.blocks.push(Block::HorizontalRule);
+        }
+        merged.blocks.append(&mut doc.blocks);
+    }
+    merged
+}
