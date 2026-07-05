@@ -1,0 +1,111 @@
+name: CI & Release
+
+on:
+  push:
+    branches: "main"
+    tags: [ "v*" ]
+  pull_request:
+    branches: "main"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo Check
+        run: cargo check --all-targets --features pdf
+      - name: Cargo Test
+        run: cargo test --features pdf
+
+  build-release:
+    name: Build - ${{ matrix.job.target }}
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          # Linux x86_64 (static musl via cross)
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, use-cross: true, asset-name: rudoc-linux-x86_64.tar.gz, binary-path: target/x86_64-unknown-linux-musl/release/rudoc }
+          # Linux ARM64 (static musl via cross)
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, use-cross: true, asset-name: rudoc-linux-aarch64.tar.gz, binary-path: target/aarch64-unknown-linux-musl/release/rudoc }
+          # Windows x86_64 (via cross to avoid MSVC dyn-link issues if wanted, or native)
+          - { os: ubuntu-latest, target: x86_64-pc-windows-gnu, use-cross: true, asset-name: rudoc-windows-x86_64.zip, binary-path: target/x86_64-pc-windows-gnu/release/rudoc.exe }
+          # macOS (Apple Silicon & Intel dual build for universal)
+          - { os: macos-latest, target: universal-apple-darwin, use-cross: false, asset-name: rudoc-macos-universal.tar.gz, binary-path: rudoc-macos-universal }
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.job.target == 'universal-apple-darwin' && 'x86_64-apple-darwin aarch64-apple-darwin' || matrix.job.target }}
+
+      - name: Install Cross
+        if: matrix.job.use-cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build with Cross
+        if: matrix.job.use-cross
+        run: cross build --release --features pdf --target ${{ matrix.job.target }}
+
+      - name: Build macOS Universal Binary
+        if: matrix.job.target == 'universal-apple-darwin'
+        run: |
+          cargo build --release --features pdf --target aarch64-apple-darwin
+          cargo build --release --features pdf --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/rudoc \
+            target/x86_64-apple-darwin/release/rudoc \
+            -output rudoc-macos-universal
+
+      - name: Archive Asset (Unix)
+        if: matrix.job.os != 'windows-latest' && matrix.job.target != 'x86_64-pc-windows-gnu'
+        run: |
+          tar -czf ${{ matrix.job.asset-name }} -C $(dirname ${{ matrix.job.binary-path }}) $(basename ${{ matrix.job.binary-path }})
+
+      - name: Archive Asset (Windows)
+        if: matrix.job.target == 'x86_64-pc-windows-gnu'
+        run: |
+          cd $(dirname ${{ matrix.job.binary-path }})
+          zip ../../../${{ matrix.job.asset-name }} $(basename ${{ matrix.job.binary-path }})
+          cd -
+
+      - name: Upload Artifact
+        uses: actions/actions-artifact-wrapper@v1
+        with:
+          name: release-assets
+          path: ${{ matrix.job.asset-name }}
+
+  publish-release:
+    name: Create GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: ./assets
+
+      - name: Display structure of downloaded files
+        run: ls -R ./assets
+
+      - name: Release to GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./assets/*
+          draft: false
+          prerelease: false
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_id) }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

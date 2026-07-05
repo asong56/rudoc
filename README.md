@@ -2,8 +2,7 @@
 
 **Fast, dependency-free document converter** — a focused Rust replacement for Pandoc.
 
-[![Release](https://img.shields.io/github/v/release/your-org/rudoc)](https://github.com/your-org/rudoc/releases)
-[![CI](https://github.com/your-org/rudoc/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/rudoc/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/asong56/rudoc)](https://github.com/asong56/rudoc/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ---
@@ -35,11 +34,11 @@ Rudoc covers the 80% use-case: rich-text ↔ rich-text, spreadsheets, and struct
 | macOS Apple Silicon | `rudoc-macos-aarch64.tar.gz` |
 | macOS Intel | `rudoc-macos-x86_64.tar.gz` |
 
-Download from [Releases](https://github.com/your-org/rudoc/releases), extract, and place on your `PATH`.
+Download from [Releases](https://github.com/asong56/rudoc/releases), extract, and place on your `PATH`.
 
 ```bash
 # Linux / macOS
-curl -L https://github.com/your-org/rudoc/releases/latest/download/rudoc-linux-x86_64.tar.gz \
+curl -L https://github.com/asong56/rudoc/releases/latest/download/rudoc-linux-x86_64.tar.gz \
   | tar -xz -C /usr/local/bin
 chmod +x /usr/local/bin/rudoc
 ```
@@ -47,7 +46,7 @@ chmod +x /usr/local/bin/rudoc
 ### Build from source
 
 ```bash
-git clone https://github.com/your-org/rudoc
+git clone https://github.com/asong56/rudoc
 cd rudoc
 
 # Default (no PDF built-in, PDF works via typst CLI on PATH)
@@ -244,9 +243,3 @@ SlideIR ──── writers for: pptx  (derived from DocIR by heading-split)
 TableIR ──── readers/writers for: csv, xlsx
 TreeIR ───── readers/writers for: xml, opml, json (lossless round-trips)
 ```
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE)
