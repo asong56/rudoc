@@ -31,7 +31,7 @@ fn run() -> Result<()> {
 
     let (input_paths, output_path) = resolve_paths(&cli)?;
     let from_fmt = detect_from(&cli, &input_paths)?;
-    let to_fmt   = detect_to(&cli, &output_path)?;
+    let to_fmt   = detect_to(&cli, &output_path, from_fmt)?;
 
     let opts = ConvertOptions {
         from: from_fmt,
@@ -52,8 +52,8 @@ fn run() -> Result<()> {
         eprintln!("[rudoc] {} → {}  ({}→{})", in_desc, out_desc, from_fmt, to_fmt);
     }
 
-    let input_bytes  = read_inputs(&input_paths, &opts)?;
-    let output_bytes = convert(&input_bytes, &opts)
+    let merged_doc  = read_inputs(&input_paths, &opts)?;
+    let output_bytes = convert(merged_doc, &opts)
         .with_context(|| format!("Conversion failed ({} → {})", from_fmt, to_fmt))?;
 
     write_output(&output_bytes, output_path.as_deref())?;
@@ -67,7 +67,6 @@ fn run() -> Result<()> {
 }
 
 fn resolve_paths(cli: &Cli) -> Result<(Vec<String>, Option<String>)> {
-    // Explicit -o always wins
     if cli.output.is_some() {
         return Ok((cli.inputs.clone(), cli.output.clone()));
     }
@@ -75,16 +74,13 @@ fn resolve_paths(cli: &Cli) -> Result<(Vec<String>, Option<String>)> {
     if inputs.is_empty() {
         return Ok((vec!["-".to_string()], None));
     }
-    // If -t is given, output must be via -o; all positionals are inputs
     if cli.to.is_some() {
         return Ok((inputs, None));
     }
-    // No -t: last positional is the output path (classic: rudoc in.md out.docx)
     if inputs.len() >= 2 {
         let last = inputs.pop().unwrap();
         return Ok((inputs, Some(last)));
     }
-    // Single positional, no -t, no -o: can't determine output
     Ok((inputs, None))
 }
 
@@ -95,26 +91,39 @@ fn detect_from(cli: &Cli, input_paths: &[String]) -> Result<Format> {
     Format::from_path(Path::new(first))
 }
 
-fn detect_to(cli: &Cli, output: &Option<String>) -> Result<Format> {
+fn detect_to(cli: &Cli, output: &Option<String>, from_fmt: Format) -> Result<Format> {
     if let Some(ref s) = cli.to { return Format::from_name(s); }
     match output.as_deref() {
-        None | Some("-") => bail!("Cannot detect output format. Use -t FORMAT or specify an output file."),
+        None | Some("-") => bail!(
+            "Cannot detect output format — no output file specified.\n\
+             Hint: input is '{from_fmt}'. Try one of:\n  \
+             rudoc input.{from_fmt} output.<ext>\n  \
+             rudoc input.{from_fmt} -t md\n  \
+             rudoc input.{from_fmt} -t html\n\
+             Run 'rudoc --help' to see all supported formats."
+        ),
         Some(p) => Format::from_path(Path::new(p)),
     }
 }
 
-fn read_inputs(paths: &[String], opts: &ConvertOptions) -> Result<Vec<u8>> {
-    if paths.len() == 1 {
-        return read_one(&paths[0]);
-    }
+/// Read and merge inputs. Returns a merged DocIR for doc-tier formats,
+/// or raw bytes for everything else (single file only).
+fn read_inputs(paths: &[String], opts: &ConvertOptions) -> Result<convert::Input> {
     use detect::IrTier;
+
+    if paths.len() == 1 {
+        let bytes = read_one(&paths[0])?;
+        return Ok(convert::Input::Bytes(bytes));
+    }
+
+    // Multi-file: only supported for doc-tier text formats
     if opts.from.ir_tier() != IrTier::Doc {
         bail!("Multiple input files are only supported for document formats.");
     }
+
     let mut docs = Vec::new();
     for path in paths {
         let bytes = read_one(path)?;
-        eprintln!("[rudoc-debug] bytes len={} first20={:?}", bytes.len(), &bytes[..bytes.len().min(20)]);
         let src = std::str::from_utf8(&bytes)
             .with_context(|| format!("'{}' is not valid UTF-8", path))?;
         let doc = match opts.from {
@@ -123,17 +132,24 @@ fn read_inputs(paths: &[String], opts: &ConvertOptions) -> Result<Vec<u8>> {
             Format::Txt      => readers::txt::parse(src)?,
             Format::Typst    => readers::typst_reader::parse(src)?,
             _ => {
-                eprintln!("[rudoc] warning: only first file used for binary format {}", opts.from);
-                return read_one(&paths[0]);
+                if !opts.quiet {
+                    eprintln!("[rudoc] warning: only first file used for binary format {}", opts.from);
+                }
+                let bytes = read_one(&paths[0])?;
+                return Ok(convert::Input::Bytes(bytes));
             }
         };
-        eprintln!("[rudoc-debug] parsed {} blocks from {}", doc.blocks.len(), path);
+        if opts.verbose {
+            eprintln!("[rudoc] parsed {} blocks from {}", doc.blocks.len(), path);
+        }
         docs.push(doc);
     }
+
     let merged = merge_docs(docs);
-    let merged_md = writers::markdown::render(&merged, false);
-    eprintln!("[rudoc-debug] merged {} blocks, {} bytes of md", merged.blocks.len(), merged_md.len());
-    Ok(merged_md.into_bytes())
+    if opts.verbose {
+        eprintln!("[rudoc] merged {} blocks total", merged.blocks.len());
+    }
+    Ok(convert::Input::Doc(merged))
 }
 
 fn read_one(path: &str) -> Result<Vec<u8>> {

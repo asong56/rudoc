@@ -22,7 +22,7 @@ EXAMPLES\n\
   rudoc data.csv data.xlsx\n\
   rudoc config.json config.xml\n\
   cat page.html | rudoc -f html -t md > page.md",
-    after_help = "Full docs: https://github.com/your-org/rudoc"
+    after_help = "Full docs: https://github.com/asong56/rudoc"
 )]
 pub struct Cli {
     /// Input file(s). Use '-' for stdin. Multiple files are merged (doc formats only).
@@ -64,15 +64,15 @@ pub struct Cli {
     #[arg(long, value_name = "NAME", default_value = "Arial")]
     pub pdf_font: String,
 
-    /// Line-wrap width for md/txt output (0 = no wrapping).
+    /// Line-wrap width for txt output (0 = no wrapping).
     #[arg(long, value_name = "COLS")]
     pub wrap: Option<usize>,
 
     /// Suppress all non-error output.
-    #[arg(short = 'q', long, action = ArgAction::SetTrue)]
+    #[arg(short = 'q', long, action = ArgAction::SetTrue, conflicts_with = "verbose")]
     pub quiet: bool,
 
     /// Print conversion steps and timing.
-    #[arg(short = 'v', long, action = ArgAction::SetTrue)]
+    #[arg(short = 'v', long, action = ArgAction::SetTrue, conflicts_with = "quiet")]
     pub verbose: bool,
 }

@@ -1,8 +1,8 @@
 //! DOCX writer using docx-rs.
-//! Images are embedded as actual binary parts in the ZIP.
+//! Writes directly to an in-memory buffer — no temp files.
 use anyhow::Result;
 use docx_rs::*;
-
+use std::io::Cursor;
 use std::path::Path;
 
 use crate::ir::doc::{Block, DocIR, Inline};
@@ -22,27 +22,20 @@ fn build_docx_bytes(doc: &DocIR) -> Result<Vec<u8>> {
         docx = docx.add_paragraph(para);
     }
 
-    // Numbering counter (each list gets its own ID)
     let mut num_id_counter = 1usize;
-
     for block in &doc.blocks {
         (docx, num_id_counter) = add_block(docx, block, num_id_counter)?;
     }
 
-    let tmp = std::env::temp_dir()
-        .join(format!("rudoc_{}_{}.docx", std::process::id(), rand_suffix()));
-    {
-        let f = std::fs::File::create(&tmp)?;
-        docx.build().pack(f).map_err(|e| anyhow::anyhow!("DOCX pack: {}", e))?;
-    }
-    let bytes = std::fs::read(&tmp)?;
-    let _ = std::fs::remove_file(&tmp);
-    Ok(bytes)
+    // Write directly to an in-memory cursor — no temp file needed
+    let mut buf: Vec<u8> = Vec::new();
+    docx.build()
+        .pack(Cursor::new(&mut buf))
+        .map_err(|e| anyhow::anyhow!("DOCX pack: {}", e))?;
+    Ok(buf)
 }
 
-fn add_block(docx: Docx, block: &Block, num_id: usize)
-    -> Result<(Docx, usize)>
-{
+fn add_block(docx: Docx, block: &Block, num_id: usize) -> Result<(Docx, usize)> {
     let mut num_id = num_id;
     let docx = match block {
         Block::Heading(level, inlines) => {
@@ -98,29 +91,25 @@ fn add_block(docx: Docx, block: &Block, num_id: usize)
                     .numbering(NumberingId::new(num_id), IndentLevel::new(0));
                 para = add_inlines_to_para(para, &inlines);
                 d = d.add_paragraph(para);
-                // Sub-blocks in list item
                 for sub in item.iter().skip(1) {
                     (d, num_id) = add_block(d, sub, num_id + 1)?;
-                    num_id -= 1; // restore after sub-block
+                    num_id -= 1;
                 }
             }
-            num_id += 1; // each list gets a unique numbering ID
+            num_id += 1;
             d
         }
         Block::Table { head, rows } => {
             let mut table = Table::new(vec![]);
             let header_cells: Vec<TableCell> = head.iter().map(|cell_inlines| {
-                let mut para = Paragraph::new();
-                para = add_inlines_to_para(para, cell_inlines);
-                // Bold header cells via wrapping run
-                let mut p2 = Paragraph::new();
-                p2 = p2.add_run(Run::new().add_text(
-                    cell_inlines.iter().map(|i| {
-                        let mut s = String::new();
-                        crate::ir::doc::inline_to_text(i, &mut s); s
-                    }).collect::<String>()
-                ).bold());
-                TableCell::new().add_paragraph(p2)
+                let text: String = cell_inlines.iter().map(|i| {
+                    let mut s = String::new();
+                    crate::ir::doc::inline_to_text(i, &mut s);
+                    s
+                }).collect();
+                TableCell::new().add_paragraph(
+                    Paragraph::new().add_run(Run::new().add_text(&text).bold())
+                )
             }).collect();
             table = table.add_row(TableRow::new(header_cells));
 
@@ -136,9 +125,7 @@ fn add_block(docx: Docx, block: &Block, num_id: usize)
         }
         Block::HorizontalRule => {
             docx.add_paragraph(
-                Paragraph::new().add_run(Run::new().add_text(
-                    "─".repeat(40)
-                ))
+                Paragraph::new().add_run(Run::new().add_text("─".repeat(40)))
             )
         }
         Block::RawBlock { content, .. } => {
@@ -169,7 +156,6 @@ fn add_inline_to_para(para: Paragraph, il: &Inline) -> Paragraph {
         Inline::Strikethrough(inner) => {
             let mut t = String::new();
             for i in inner { crate::ir::doc::inline_to_text(i, &mut t); }
-            // docx-rs Run doesn't expose strike directly; embed via run_property path
             para.add_run(Run::new().add_text(format!("~~{}~~", t)))
         }
         Inline::Code(s) => {
@@ -202,23 +188,13 @@ fn add_inline_to_para(para: Paragraph, il: &Inline) -> Paragraph {
     }
 }
 
-/// Try to read local image file into bytes.
-/// Returns None for URLs (http/https) or missing files.
 fn try_embed_image(src: &str) -> Option<Vec<u8>> {
-    // Skip URLs
     if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
         return None;
     }
     let path = Path::new(src);
-    if path.exists() {
-        std::fs::read(path).ok()
-    } else {
-        None
-    }
+    if path.exists() { std::fs::read(path).ok() } else { None }
 }
-
-/// Get image width in EMU (English Metric Units: 1 inch = 914400 EMU).
-/// Reads actual image dimensions, falls back to 3 inches wide.
 
 fn read_image_dims(src: &str) -> Option<(u32, u32)> {
     let path = Path::new(src);
@@ -226,10 +202,8 @@ fn read_image_dims(src: &str) -> Option<(u32, u32)> {
     let reader = image::io::Reader::open(path).ok()?;
     let reader = reader.with_guessed_format().ok()?;
     let (w_px, h_px) = reader.into_dimensions().ok()?;
-    // Convert pixels to EMU assuming 96 DPI: 1 px = 914400/96 = 9525 EMU
     let w_emu = w_px * 9525;
     let h_emu = h_px * 9525;
-    // Cap at page width (6 inches = 5486400 EMU) maintaining aspect ratio
     let max_w: u32 = 5486400;
     if w_emu > max_w {
         let scale = max_w as f64 / w_emu as f64;
@@ -237,12 +211,4 @@ fn read_image_dims(src: &str) -> Option<(u32, u32)> {
     } else {
         Some((w_emu, h_emu))
     }
-}
-
-fn rand_suffix() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(42)
 }

@@ -1,9 +1,8 @@
 use anyhow::{bail, Context, Result};
 
-
-
 use crate::detect::{Format, IrTier};
 use crate::error::RudocError;
+use crate::ir::doc::DocIR;
 use crate::ir::slide::SlideIR;
 use crate::{readers, writers};
 
@@ -39,8 +38,15 @@ impl Default for ConvertOptions {
     }
 }
 
-/// Read input bytes, convert, write output bytes.
-pub fn convert(input: &[u8], opts: &ConvertOptions) -> Result<Vec<u8>> {
+/// Input to the converter — either raw bytes (single file / binary formats)
+/// or a pre-parsed and merged DocIR (multi-file doc-tier path).
+pub enum Input {
+    Bytes(Vec<u8>),
+    Doc(DocIR),
+}
+
+/// Convert input to output bytes.
+pub fn convert(input: Input, opts: &ConvertOptions) -> Result<Vec<u8>> {
     let from = opts.from;
     let to = opts.to;
 
@@ -50,12 +56,10 @@ pub fn convert(input: &[u8], opts: &ConvertOptions) -> Result<Vec<u8>> {
 
     // ── md → pptx (special cross-tier path) ─────────────────────────
     if from == Format::Markdown && to == Format::Pptx {
-        let src = std::str::from_utf8(input).context("Input is not valid UTF-8")?;
-        let doc = readers::markdown::parse(src)?;
+        let doc = input_to_doc(input, opts)?;
         let slides = SlideIR::from_doc(&doc, opts.slide_level);
         if opts.verbose { eprintln!("[rudoc] {} slides generated", slides.slides.len()); }
-        let bytes = writers::pptx::render(&slides)?;
-        return Ok(bytes);
+        return writers::pptx::render(&slides);
     }
 
     // Validate tier compatibility
@@ -66,53 +70,77 @@ pub fn convert(input: &[u8], opts: &ConvertOptions) -> Result<Vec<u8>> {
     }
 
     match from_tier {
-        IrTier::Doc => convert_doc(input, from, to, opts),
-        IrTier::Table => convert_table(input, from, to, opts),
-        IrTier::Tree => convert_tree(input, from, to, opts),
+        IrTier::Doc => {
+            let doc = input_to_doc(input, opts)?;
+            convert_doc_ir(doc, to, opts)
+        }
+        IrTier::Table => {
+            let bytes = input_to_bytes(input);
+            convert_table(&bytes, from, to, opts)
+        }
+        IrTier::Tree => {
+            let bytes = input_to_bytes(input);
+            convert_tree(&bytes, from, to, opts)
+        }
         IrTier::Slide => bail!("Direct pptx → pptx conversion is a no-op"),
     }
 }
 
-// ── Doc tier ─────────────────────────────────────────────────────────────
+fn input_to_bytes(input: Input) -> Vec<u8> {
+    match input {
+        Input::Bytes(b) => b,
+        Input::Doc(_) => unreachable!("Doc input should not reach table/tree tier"),
+    }
+}
 
-fn convert_doc(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
-    // Read → DocIR
-    let doc = match from {
+fn input_to_doc(input: Input, opts: &ConvertOptions) -> Result<DocIR> {
+    match input {
+        Input::Doc(doc) => Ok(doc),
+        Input::Bytes(bytes) => parse_doc(&bytes, opts.from),
+    }
+}
+
+fn parse_doc(input: &[u8], from: Format) -> Result<DocIR> {
+    match from {
         Format::Markdown => {
             let src = std::str::from_utf8(input)?;
             let mut doc = readers::markdown::parse(src)?;
             if doc.metadata.title.is_none() {
                 doc.metadata.title = readers::markdown::extract_title(src);
             }
-            doc
+            Ok(doc)
         }
         Format::Html => {
             let src = std::str::from_utf8(input)?;
-            readers::html::parse(src)?
+            readers::html::parse(src)
         }
         Format::Txt => {
             let src = std::str::from_utf8(input)?;
-            readers::txt::parse(src)?
+            readers::txt::parse(src)
         }
-        Format::Docx => readers::docx::parse(input)?,
+        Format::Docx => readers::docx::parse(input),
         Format::Typst => {
             let src = std::str::from_utf8(input)?;
-            readers::typst_reader::parse(src)?
+            readers::typst_reader::parse(src)
         }
-        Format::Pdf => {
-            bail!("PDF reading (text extraction) is not yet implemented in this build.\nTip: use a .typ or .md source file instead.")
-        }
+        Format::Pdf => bail!(
+            "PDF reading (text extraction) is not yet implemented in this build.\n\
+             Tip: use a .typ or .md source file instead."
+        ),
         _ => bail!("Unexpected format in doc tier: {}", from),
-    };
+    }
+}
 
+// ── Doc tier ─────────────────────────────────────────────────────────────
+
+fn convert_doc_ir(doc: DocIR, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
     if opts.verbose {
         eprintln!("[rudoc] DocIR: {} blocks", doc.blocks.len());
     }
 
-    // DocIR → output
     match to {
         Format::Markdown => {
-            let s = writers::markdown::render(&doc, opts.wrap.is_some());
+            let s = writers::markdown::render(&doc, opts.wrap);
             Ok(s.into_bytes())
         }
         Format::Html => {
@@ -166,15 +194,14 @@ fn convert_table(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) 
 fn convert_tree(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
     let src = std::str::from_utf8(input)?;
     let tree = match from {
-        Format::Xml => readers::xml::parse(src)?,
+        Format::Xml  => readers::xml::parse(src)?,
         Format::Opml => readers::opml::parse(src)?,
         Format::Json => readers::json::parse(src)?,
         _ => bail!("Unexpected format in tree tier: {}", from),
     };
 
     if opts.verbose {
-        eprintln!("[rudoc] TreeIR root: <{}>  {} children",
-            tree.tag, tree.children.len());
+        eprintln!("[rudoc] TreeIR root: <{}>  {} children", tree.tag, tree.children.len());
     }
 
     match to {
@@ -194,11 +221,10 @@ fn convert_tree(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -
     }
 }
 
-/// Merge multiple DocIR inputs (for multi-file input).
-pub fn merge_docs(docs: Vec<crate::ir::doc::DocIR>) -> crate::ir::doc::DocIR {
-    use crate::ir::doc::{Block, DocIR};
+/// Merge multiple DocIR inputs into one, separated by horizontal rules.
+pub fn merge_docs(docs: Vec<DocIR>) -> DocIR {
+    use crate::ir::doc::Block;
     let mut merged = DocIR::new();
-    // Use first document's metadata
     if let Some(first) = docs.first() {
         merged.metadata = first.metadata.clone();
     }
