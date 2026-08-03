@@ -75,4 +75,12 @@ pub struct Cli {
     /// Print conversion steps and timing.
     #[arg(short = 'v', long, action = ArgAction::SetTrue, conflicts_with = "quiet")]
     pub verbose: bool,
+
+    /// Emit machine-readable status as JSON Lines on stderr instead of
+    /// human-readable text (stdout still carries only the converted
+    /// document bytes). Each line is one JSON object with a stable "event"
+    /// field: "start" (from/to/input/output), "done" (bytes/ms), or
+    /// "error" (code/exit_code/message). Overrides --quiet for these events.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub json: bool,
 }

@@ -1,5 +1,13 @@
-/// PPTX writer — generates a standards-compliant .pptx from SlideIR.
-/// Produces the minimal Open XML structure required by LibreOffice / MS PowerPoint.
+//! PPTX writer — generates a standards-compliant .pptx from SlideIR.
+//!
+//! Two correctness properties matter beyond just "PowerPoint can open it":
+//! 1. Deterministic bytes: converting the same input twice must produce a
+//!    byte-identical file, so every zip entry is stamped with a fixed
+//!    timestamp instead of the wall-clock time.
+//! 2. Image/document-position fidelity: if one image on a slide fails to
+//!    load (bad path, corrupt file, unsupported format), every image after
+//!    it must still land in its correct position rather than shifting up
+//!    by one slot (see `PendingImage::occurrence` below).
 use anyhow::Result;
 use image::ImageEncoder;
 use std::io::Write;
@@ -9,10 +17,17 @@ use zip::{write::FileOptions, ZipWriter};
 use crate::ir::doc::{Block, Inline};
 use crate::ir::slide::{Slide, SlideIR};
 
-/// One embedded picture collected while walking the slide bodies.
+/// One embedded picture collected while walking a slide's body.
 struct PendingImage {
     /// 1-based index used in `ppt/media/imageN.<ext>` and the rel id.
     index: usize,
+    /// Position of this image among *all* `Inline::Image` nodes on the
+    /// slide, including ones that failed to load. Because `try_load_image`
+    /// can return `None`, this slide's `Vec<PendingImage>` may have gaps
+    /// relative to the document; `occurrence` is how the render pass lines
+    /// each successfully-loaded image back up with its original slot
+    /// instead of assuming positional (index-only) correspondence.
+    occurrence: usize,
     ext: &'static str,
     bytes: Vec<u8>,
     /// Width/height in EMU, already clamped to fit inside the slide body box.
@@ -21,10 +36,9 @@ struct PendingImage {
 }
 
 pub fn render(slides_in: &SlideIR) -> Result<Vec<u8>> {
-    // Guarantee at least one slide — an empty <p:sldIdLst> is treated as a
-    // corrupt package by PowerPoint/LibreOffice. SlideIR::from_doc already
-    // guards against this for the normal md→pptx path, but we defend here
-    // too in case `render` is ever called directly with an empty SlideIR.
+    // An empty <p:sldIdLst> is treated as a corrupt package by PowerPoint/
+    // LibreOffice. SlideIR::from_doc already guards against this, but we
+    // defend here too in case `render` is ever called directly.
     let mut owned;
     let slides: &SlideIR = if slides_in.slides.is_empty() {
         owned = slides_in.clone();
@@ -41,20 +55,24 @@ pub fn render(slides_in: &SlideIR) -> Result<Vec<u8>> {
     let buf = Vec::new();
     let cursor = std::io::Cursor::new(buf);
     let mut zip = ZipWriter::new(cursor);
+    // Fixed timestamp (the zip format's own epoch) on every entry: without
+    // this, two conversions of the same input produce different bytes
+    // purely from wall-clock time, which breaks anything that hashes or
+    // diffs the output (reproducible builds, content-addressed caches, etc).
     let opts = FileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default());
 
-    // First pass: resolve every image referenced anywhere in the deck, in
-    // slide order. We need this before writing [Content_Types].xml and the
-    // per-slide XML so we know which media parts / extensions exist and can
-    // assign relationship ids consistently.
+    // Resolve every image up front, per slide, so we know which media
+    // files/extensions exist before writing [Content_Types].xml.
     let mut images_per_slide: Vec<Vec<PendingImage>> = Vec::with_capacity(slides.slides.len());
     let mut media_index = 1usize;
     let mut any_png = false;
     let mut any_jpeg = false;
     for slide in &slides.slides {
         let mut found = Vec::new();
-        collect_images(&slide.body, &mut media_index, &mut found);
+        let mut occurrence = 0usize;
+        collect_images(&slide.body, &mut media_index, &mut occurrence, &mut found);
         for img in &found {
             match img.ext {
                 "png" => any_png = true,
@@ -71,58 +89,45 @@ pub fn render(slides_in: &SlideIR) -> Result<Vec<u8>> {
         .collect();
     let has_any_notes = notes_flags.iter().any(|b| *b);
 
-    // [Content_Types].xml — must list every slide/notesSlide part and every
-    // image extension actually used, or the package is invalid OPC.
     zip.start_file("[Content_Types].xml", opts)?;
     zip.write_all(
         content_types_xml(slides.slides.len(), &notes_flags, any_png, any_jpeg).as_bytes(),
     )?;
 
-    // _rels/.rels
     zip.start_file("_rels/.rels", opts)?;
     zip.write_all(ROOT_RELS.as_bytes())?;
 
-    // docProps/core.xml + docProps/app.xml
     zip.start_file("docProps/core.xml", opts)?;
     zip.write_all(core_props_xml(&slides.title).as_bytes())?;
     zip.start_file("docProps/app.xml", opts)?;
     zip.write_all(app_props_xml(slides.slides.len()).as_bytes())?;
 
-    // ppt/presentation.xml
     zip.start_file("ppt/presentation.xml", opts)?;
     zip.write_all(presentation_xml(slides.slides.len(), has_any_notes).as_bytes())?;
 
-    // ppt/_rels/presentation.xml.rels
     zip.start_file("ppt/_rels/presentation.xml.rels", opts)?;
     zip.write_all(presentation_rels(slides.slides.len(), has_any_notes).as_bytes())?;
 
-    // ppt/slideLayouts/slideLayout1.xml  (shared blank layout)
     zip.start_file("ppt/slideLayouts/slideLayout1.xml", opts)?;
     zip.write_all(SLIDE_LAYOUT.as_bytes())?;
-
     zip.start_file("ppt/slideLayouts/_rels/slideLayout1.xml.rels", opts)?;
     zip.write_all(SLIDE_LAYOUT_RELS.as_bytes())?;
 
-    // ppt/slideMasters/slideMaster1.xml
     zip.start_file("ppt/slideMasters/slideMaster1.xml", opts)?;
     zip.write_all(SLIDE_MASTER.as_bytes())?;
-
     zip.start_file("ppt/slideMasters/_rels/slideMaster1.xml.rels", opts)?;
     zip.write_all(SLIDE_MASTER_RELS.as_bytes())?;
 
-    // ppt/theme/theme1.xml
     zip.start_file("ppt/theme/theme1.xml", opts)?;
     zip.write_all(THEME.as_bytes())?;
 
     if has_any_notes {
         zip.start_file("ppt/notesMasters/notesMaster1.xml", opts)?;
         zip.write_all(NOTES_MASTER.as_bytes())?;
-
         zip.start_file("ppt/notesMasters/_rels/notesMaster1.xml.rels", opts)?;
         zip.write_all(NOTES_MASTER_RELS.as_bytes())?;
     }
 
-    // Individual slides (+ optional notes slides, + media, + rels)
     for (i, slide) in slides.slides.iter().enumerate() {
         let num = i + 1;
         let images = &images_per_slide[i];
@@ -141,8 +146,7 @@ pub fn render(slides_in: &SlideIR) -> Result<Vec<u8>> {
 
         if has_notes {
             zip.start_file(&format!("ppt/notesSlides/notesSlide{}.xml", num), opts)?;
-            zip.write_all(notes_slide_xml(slide.notes.as_deref().unwrap_or(""), num).as_bytes())?;
-
+            zip.write_all(notes_slide_xml(slide.notes.as_deref().unwrap_or("")).as_bytes())?;
             zip.start_file(&format!("ppt/notesSlides/_rels/notesSlide{}.xml.rels", num), opts)?;
             zip.write_all(notes_slide_rels(num).as_bytes())?;
         }
@@ -157,35 +161,45 @@ pub fn render(slides_in: &SlideIR) -> Result<Vec<u8>> {
 const MAX_IMG_LONG_EDGE: u32 = 1600;
 const JPEG_QUALITY: u8 = 80;
 
-/// Slide content-area box, in EMU (matches the `<p:spPr><a:xfrm>` used for
-/// the "Content" placeholder in `slide_xml`).
+/// Slide content-area box, in EMU (matches the "Content" placeholder's
+/// `<a:xfrm>` in `slide_xml`).
 const BODY_MAX_W_EMU: u32 = 8_229_600;
 const BODY_MAX_H_EMU: u32 = 4_525_963;
 
-fn collect_images(blocks: &[Block], media_index: &mut usize, out: &mut Vec<PendingImage>) {
+fn collect_images(
+    blocks: &[Block],
+    media_index: &mut usize,
+    occurrence: &mut usize,
+    out: &mut Vec<PendingImage>,
+) {
     for block in blocks {
-        collect_images_block(block, media_index, out);
+        collect_images_block(block, media_index, occurrence, out);
     }
 }
 
-fn collect_images_block(block: &Block, media_index: &mut usize, out: &mut Vec<PendingImage>) {
+fn collect_images_block(
+    block: &Block,
+    media_index: &mut usize,
+    occurrence: &mut usize,
+    out: &mut Vec<PendingImage>,
+) {
     match block {
         Block::Para(inlines) | Block::Heading(_, inlines) => {
-            collect_images_inlines(inlines, media_index, out);
+            collect_images_inlines(inlines, media_index, occurrence, out);
         }
-        Block::BlockQuote(blocks) => collect_images(blocks, media_index, out),
+        Block::BlockQuote(blocks) => collect_images(blocks, media_index, occurrence, out),
         Block::List { items, .. } => {
             for item in items {
-                collect_images(item, media_index, out);
+                collect_images(item, media_index, occurrence, out);
             }
         }
         Block::Table { head, rows } => {
             for cell in head {
-                collect_images_inlines(cell, media_index, out);
+                collect_images_inlines(cell, media_index, occurrence, out);
             }
             for row in rows {
                 for cell in row {
-                    collect_images_inlines(cell, media_index, out);
+                    collect_images_inlines(cell, media_index, occurrence, out);
                 }
             }
         }
@@ -193,10 +207,17 @@ fn collect_images_block(block: &Block, media_index: &mut usize, out: &mut Vec<Pe
     }
 }
 
-fn collect_images_inlines(inlines: &[Inline], media_index: &mut usize, out: &mut Vec<PendingImage>) {
+fn collect_images_inlines(
+    inlines: &[Inline],
+    media_index: &mut usize,
+    occurrence: &mut usize,
+    out: &mut Vec<PendingImage>,
+) {
     for il in inlines {
         if let Inline::Image { src, .. } = il {
-            if let Some(pending) = try_load_image(src, *media_index) {
+            let this_occurrence = *occurrence;
+            *occurrence += 1;
+            if let Some(pending) = try_load_image(src, *media_index, this_occurrence) {
                 *media_index += 1;
                 out.push(pending);
             }
@@ -204,11 +225,10 @@ fn collect_images_inlines(inlines: &[Inline], media_index: &mut usize, out: &mut
     }
 }
 
-/// Loads a local image from disk, downsamples it if needed to keep the
-/// output package small, and re-encodes it to a compact format. Remote
-/// (http/https) and data: URIs are skipped — rudoc does not fetch network
-/// resources during conversion.
-fn try_load_image(src: &str, index: usize) -> Option<PendingImage> {
+/// Loads a local image, downsamples it if needed, and re-encodes it to a
+/// compact format. Remote (http/https) and data: URIs are skipped — rudoc
+/// does not fetch network resources during conversion.
+fn try_load_image(src: &str, index: usize, occurrence: usize) -> Option<PendingImage> {
     if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
         return None;
     }
@@ -234,10 +254,9 @@ fn try_load_image(src: &str, index: usize) -> Option<PendingImage> {
 
     let (px_w, px_h) = (img.width(), img.height());
 
-    // Keep PNG (lossless, usually has transparency) as PNG; re-encode
-    // everything else as JPEG at a moderate quality to keep file size down.
-    // This is the dominant lever for staying under the size budget when a
-    // deck embeds several photos.
+    // PNG stays PNG (lossless, often has transparency); everything else is
+    // re-encoded as JPEG at a moderate quality — the main lever for keeping
+    // a deck with several embedded photos under the size budget.
     let (ext, bytes): (&'static str, Vec<u8>) = if format_is_png {
         let mut out = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new_with_quality(
@@ -246,9 +265,7 @@ fn try_load_image(src: &str, index: usize) -> Option<PendingImage> {
             image::codecs::png::FilterType::Adaptive,
         );
         let rgba = img.to_rgba8();
-        encoder
-            .write_image(&rgba, px_w, px_h, image::ColorType::Rgba8)
-            .ok()?;
+        encoder.write_image(&rgba, px_w, px_h, image::ColorType::Rgba8).ok()?;
         ("png", out)
     } else {
         let mut out = Vec::new();
@@ -267,30 +284,32 @@ fn try_load_image(src: &str, index: usize) -> Option<PendingImage> {
     let w_emu = (w_emu_raw as f64 * scale) as u32;
     let h_emu = (h_emu_raw as f64 * scale) as u32;
 
-    Some(PendingImage { index, ext, bytes, w_emu, h_emu })
+    Some(PendingImage { index, occurrence, ext, bytes, w_emu, h_emu })
 }
 
 // ── XML generators ─────────────────────────────────────────────────────────
 
 fn slide_xml(slide: &Slide, images: &[PendingImage]) -> String {
     let title_xml = xml_escape(&slide.title);
-
-    // Split body content: images and tables render as their own top-level
-    // shapes (<p:pic> / <p:graphicFrame>) stacked below the text
-    // placeholder, everything else stays in the text placeholder as
-    // before. This keeps the common (text-only) path visually identical
-    // to before, while giving images and tables real, structured shapes
-    // instead of corrupting or flattening them into plain text.
-    let mut rel_id = 2usize; // rId1 is reserved for the slideLayout relationship
     let body_xml = blocks_to_txBody(&slide.body);
 
+    // Images/tables render as their own top-level shapes, stacked below the
+    // text placeholder, rather than living inside its <p:txBody>.
+    let mut rel_id = 2usize; // rId1 is reserved for the slideLayout relationship
     let mut extra_shapes = String::new();
     let mut shape_id = 4u32; // 1=group,2=title,3=content
-    let mut img_iter = images.iter();
-    // Extra shapes (pictures/tables) are stacked starting just below the
-    // content placeholder so they don't overlap the title/body text.
+    let mut occurrence = 0usize;
+    let mut images_iter = images.iter().peekable();
     let mut next_y: u32 = 1_600_200;
-    collect_extra_shapes(&slide.body, &mut img_iter, &mut rel_id, &mut shape_id, &mut next_y, &mut extra_shapes);
+    collect_extra_shapes(
+        &slide.body,
+        &mut images_iter,
+        &mut occurrence,
+        &mut rel_id,
+        &mut shape_id,
+        &mut next_y,
+        &mut extra_shapes,
+    );
 
     format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -307,7 +326,6 @@ fn slide_xml(slide: &Slide, images: &[PendingImage]) -> String {
         <a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="6858000"/></a:xfrm>
       </p:grpSpPr>
 
-      <!-- Title -->
       <p:sp>
         <p:nvSpPr>
           <p:cNvPr id="2" name="Title"/>
@@ -324,7 +342,6 @@ fn slide_xml(slide: &Slide, images: &[PendingImage]) -> String {
         </p:txBody>
       </p:sp>
 
-      <!-- Body -->
       <p:sp>
         <p:nvSpPr>
           <p:cNvPr id="3" name="Content"/>
@@ -352,29 +369,48 @@ fn slide_xml(slide: &Slide, images: &[PendingImage]) -> String {
     )
 }
 
-/// Walks the same block tree as `blocks_to_txBody` looking for images and
-/// tables, and emits a `<p:pic>` or `<p:graphicFrame>` shape for each one,
-/// stacked vertically (via `next_y`) so multiple such shapes on one slide
-/// don't overlap. Consumes relationship ids / shape ids / PendingImages in
-/// lockstep with how `collect_images` produced them.
+const SLIDE_BODY_BOTTOM: u32 = 1_600_200 + 4_525_963;
+
+/// Consumes one Image-node "slot": advances `occurrence` past it and, only
+/// if a successfully-loaded image exists for that *exact* occurrence number,
+/// removes it from `images` and returns it. If the image at this slot failed
+/// to load, `images` isn't touched, leaving it correctly aligned for the
+/// next slide element that does have a match — this is what prevents a
+/// later image from sliding into an earlier, failed image's position.
+fn advance_and_take<'a>(
+    images: &mut std::iter::Peekable<std::slice::Iter<'a, PendingImage>>,
+    occurrence: &mut usize,
+) -> Option<&'a PendingImage> {
+    let this_occurrence = *occurrence;
+    *occurrence += 1;
+    if images.peek().map(|img| img.occurrence) == Some(this_occurrence) {
+        images.next()
+    } else {
+        None
+    }
+}
+
+/// Walks the same block tree as `blocks_to_txBody`, emitting a `<p:pic>` or
+/// `<p:graphicFrame>` shape for each image/table, stacked vertically via
+/// `next_y` so multiple such shapes on one slide don't overlap.
 fn collect_extra_shapes<'a>(
     blocks: &[Block],
-    images: &mut std::slice::Iter<'a, PendingImage>,
+    images: &mut std::iter::Peekable<std::slice::Iter<'a, PendingImage>>,
+    occurrence: &mut usize,
     rel_id: &mut usize,
     shape_id: &mut u32,
     next_y: &mut u32,
     out: &mut String,
 ) {
     for block in blocks {
-        collect_extra_shapes_block(block, images, rel_id, shape_id, next_y, out);
+        collect_extra_shapes_block(block, images, occurrence, rel_id, shape_id, next_y, out);
     }
 }
 
-const SLIDE_BODY_BOTTOM: u32 = 1_600_200 + 4_525_963;
-
 fn collect_extra_shapes_block<'a>(
     block: &Block,
-    images: &mut std::slice::Iter<'a, PendingImage>,
+    images: &mut std::iter::Peekable<std::slice::Iter<'a, PendingImage>>,
+    occurrence: &mut usize,
     rel_id: &mut usize,
     shape_id: &mut u32,
     next_y: &mut u32,
@@ -383,8 +419,8 @@ fn collect_extra_shapes_block<'a>(
     match block {
         Block::Para(inlines) | Block::Heading(_, inlines) => {
             for il in inlines {
-                if let Inline::Image { .. } = il {
-                    if let Some(img) = images.next() {
+                if matches!(il, Inline::Image { .. }) {
+                    if let Some(img) = advance_and_take(images, occurrence) {
                         emit_pic(img, rel_id, shape_id, *next_y, out);
                         *next_y = (*next_y + img.h_emu + 91_440).min(SLIDE_BODY_BOTTOM);
                     }
@@ -392,20 +428,22 @@ fn collect_extra_shapes_block<'a>(
             }
         }
         Block::BlockQuote(blocks) => {
-            collect_extra_shapes(blocks, images, rel_id, shape_id, next_y, out)
+            collect_extra_shapes(blocks, images, occurrence, rel_id, shape_id, next_y, out)
         }
         Block::List { items, .. } => {
             for item in items {
-                collect_extra_shapes(item, images, rel_id, shape_id, next_y, out);
+                collect_extra_shapes(item, images, occurrence, rel_id, shape_id, next_y, out);
             }
         }
         Block::Table { head, rows } => {
-            // Consume any images embedded inside table cells first, in
-            // reading order, to stay in sync with collect_images.
+            // Table-cell images aren't rendered as separate <p:pic> shapes
+            // (a table cell can't easily host one), but we must still
+            // advance occurrence/images in lockstep with collect_images so
+            // later images on the slide keep matching correctly.
             for cell in head {
                 for il in cell {
                     if matches!(il, Inline::Image { .. }) {
-                        images.next();
+                        advance_and_take(images, occurrence);
                     }
                 }
             }
@@ -413,12 +451,12 @@ fn collect_extra_shapes_block<'a>(
                 for cell in row {
                     for il in cell {
                         if matches!(il, Inline::Image { .. }) {
-                            images.next();
+                            advance_and_take(images, occurrence);
                         }
                     }
                 }
             }
-            let row_count = 1 + rows.len().max(0);
+            let row_count = 1 + rows.len();
             let table_h = (row_count as u32 * 370_840).min(4_525_963);
             out.push_str(&table_to_graphic_frame(head, rows, *shape_id, *next_y, table_h));
             *shape_id += 1;
@@ -429,7 +467,6 @@ fn collect_extra_shapes_block<'a>(
 }
 
 fn emit_pic(img: &PendingImage, rel_id: &mut usize, shape_id: &mut u32, y_off: u32, out: &mut String) {
-    // Horizontally centre the picture inside the content placeholder box.
     let off_x = 457200 + (BODY_MAX_W_EMU.saturating_sub(img.w_emu)) / 2;
     out.push_str(&format!(
         r#"<p:pic>
@@ -478,16 +515,12 @@ fn blocks_to_txBody(blocks: &[Block]) -> String {
 fn block_to_para(block: &Block, out: &mut String, indent: u32) {
     match block {
         Block::Para(inlines) | Block::Heading(_, inlines) => {
-            // A paragraph that is *only* an image renders as a <p:pic> shape
-            // instead (see collect_extra_shapes), so skip it here to avoid an
-            // empty/duplicated text run.
+            // An image-only paragraph is rendered as a <p:pic> shape instead
+            // (see collect_extra_shapes); skip it here to avoid an empty run.
             if inlines.len() == 1 && matches!(inlines[0], Inline::Image { .. }) {
                 return;
             }
-            out.push_str(&format!(
-                "<a:p><a:pPr marL=\"{}\" indent=\"0\"/>",
-                indent * 342900
-            ));
+            out.push_str(&format!("<a:p><a:pPr marL=\"{}\" indent=\"0\"/>", indent * 342900));
             for il in inlines {
                 inline_to_run(il, out);
             }
@@ -529,22 +562,17 @@ fn block_to_para(block: &Block, out: &mut String, indent: u32) {
             for b in blocks { block_to_para(b, out, indent + 1); }
         }
         Block::Table { .. } => {
-            // Real tables are rendered as separate <p:graphicFrame> shapes
-            // (see collect_extra_shapes), not injected into this <p:txBody>.
-            // Injecting a </p:sp> here would corrupt the enclosing shape's
-            // XML structure, so we intentionally emit nothing for the text
-            // body and let the graphicFrame carry the content instead.
+            // Rendered as a separate <p:graphicFrame> (see collect_extra_shapes),
+            // never inside this <p:txBody> — injecting a </p:sp> here would
+            // corrupt the enclosing shape's XML structure.
         }
         _ => {}
     }
 }
 
-/// Renders a table as a standalone, well-formed `<p:graphicFrame>` shape
-/// (sibling to the Title/Content `<p:sp>` shapes, not nested inside them),
-/// containing a proper `<a:tbl>` so column/row structure and header
-/// emphasis survive the conversion instead of degrading into
-/// pipe-joined text. `y_off`/`h` let multiple tables on one slide stack
-/// vertically instead of overlapping.
+/// Renders a table as a standalone `<p:graphicFrame>` + `<a:tbl>` (sibling
+/// to the Title/Content shapes), preserving column/row structure and header
+/// emphasis instead of degrading into pipe-joined text.
 fn table_to_graphic_frame(
     head: &[Vec<Inline>],
     rows: &[Vec<Vec<Inline>>],
@@ -587,12 +615,8 @@ fn table_to_graphic_frame(
   </a:graphic>
 </p:graphicFrame>
 "#,
-        id = shape_id,
-        y = y_off,
-        total_w = total_w,
-        h = h,
-        grid_cols = grid_cols,
-        rows_xml = rows_xml,
+        id = shape_id, y = y_off, total_w = total_w, h = h,
+        grid_cols = grid_cols, rows_xml = rows_xml,
     )
 }
 
@@ -608,8 +632,7 @@ fn table_row_xml(cells: &[Vec<Inline>], col_count: usize, is_header: bool) -> St
         let bold = if is_header { " b=\"1\"" } else { "" };
         tc_xml.push_str(&format!(
             r#"<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="1400"{bold}/><a:t>{text}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>"#,
-            bold = bold,
-            text = xml_escape(&text),
+            bold = bold, text = xml_escape(&text),
         ));
     }
     format!("<a:tr h=\"{}\">{}</a:tr>", row_h, tc_xml)
@@ -619,8 +642,7 @@ fn inline_to_run(il: &Inline, out: &mut String) {
     match il {
         Inline::Text(t) => {
             if !t.is_empty() {
-                out.push_str(&format!("<a:r><a:rPr lang=\"en-US\" sz=\"1800\"/><a:t>{}</a:t></a:r>",
-                    xml_escape(t)));
+                out.push_str(&format!("<a:r><a:rPr lang=\"en-US\" sz=\"1800\"/><a:t>{}</a:t></a:r>", xml_escape(t)));
             }
         }
         Inline::Strong(inner) => {
@@ -644,15 +666,13 @@ fn inline_to_run(il: &Inline, out: &mut String) {
             ));
         }
         Inline::Link { url, content, .. } => {
-            // PPTX hyperlinks require relationship IDs; flatten to text for now
+            // PPTX hyperlinks need relationship IDs; flatten to text for now.
             let mut text = String::new();
             for il in content { crate::ir::doc::inline_to_text(il, &mut text); }
-            out.push_str(&format!("<a:r><a:t>{} ({})</a:t></a:r>",
-                xml_escape(&text), xml_escape(url)));
+            out.push_str(&format!("<a:r><a:t>{} ({})</a:t></a:r>", xml_escape(&text), xml_escape(url)));
         }
         Inline::Image { .. } => {
-            // Rendered separately as a <p:pic> shape (see collect_extra_shapes);
-            // nothing to emit inline here.
+            // Rendered separately as a <p:pic> shape (see collect_extra_shapes).
         }
         Inline::LineBreak | Inline::SoftBreak => {
             out.push_str("<a:br/>");
@@ -674,9 +694,7 @@ fn presentation_xml(slide_count: usize, has_notes: bool) -> String {
         .join("\n      ");
     let notes_master_lst = if has_notes {
         r#"<p:notesMasterIdLst><p:notesMasterId r:id="rId3"/></p:notesMasterIdLst>"#
-    } else {
-        ""
-    };
+    } else { "" };
     format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -705,9 +723,7 @@ fn presentation_rels(slide_count: usize, has_notes: bool) -> String {
         .join("\n  ");
     let notes_master_rel = if has_notes {
         r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" Target="notesMasters/notesMaster1.xml"/>"#
-    } else {
-        ""
-    };
+    } else { "" };
     format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
@@ -718,8 +734,8 @@ fn presentation_rels(slide_count: usize, has_notes: bool) -> String {
 "#, slide_rels = slide_rels, notes_master_rel = notes_master_rel)
 }
 
-/// Per-slide relationships: layout (rId1), then one relationship per
-/// embedded image (rId2, rId3, ...), then optionally the notes slide.
+/// Per-slide relationships: layout (rId1), one per embedded image, then
+/// optionally the notes slide.
 fn slide_rels(slide_num: usize, images: &[PendingImage], has_notes: bool) -> String {
     let mut rels = String::new();
     rels.push_str(r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#);
@@ -732,33 +748,24 @@ fn slide_rels(slide_num: usize, images: &[PendingImage], has_notes: bool) -> Str
         ));
         rel_id += 1;
     }
-
     if has_notes {
         rels.push_str(&format!(
             "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" Target=\"../notesSlides/notesSlide{}.xml\"/>",
             rel_id, slide_num,
         ));
     }
-
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-{rels}
-</Relationships>"#,
-        rels = rels
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n{}\n</Relationships>",
+        rels
     )
 }
 
-fn notes_slide_xml(notes: &str, _slide_num: usize) -> String {
+fn notes_slide_xml(notes: &str) -> String {
     let paras: String = notes
         .lines()
         .map(|line| format!("<a:p><a:r><a:rPr lang=\"en-US\"/><a:t>{}</a:t></a:r></a:p>", xml_escape(line)))
         .collect();
-    let paras = if paras.is_empty() {
-        "<a:p><a:endParaRPr/></a:p>".to_string()
-    } else {
-        paras
-    };
+    let paras = if paras.is_empty() { "<a:p><a:endParaRPr/></a:p>".to_string() } else { paras };
     format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -819,10 +826,10 @@ fn app_props_xml(slide_count: usize) -> String {
 </Properties>"#, count = slide_count)
 }
 
-/// Escapes text for safe inclusion in XML content/attributes, and strips
-/// characters that are illegal in XML 1.0 (control characters other than
-/// tab/newline/CR). Without this, stray control bytes anywhere in the source
-/// document produce non-well-formed XML that PowerPoint refuses to open.
+/// Escapes XML special characters and strips characters illegal in XML 1.0
+/// (control chars other than tab/newline/CR) — otherwise stray control
+/// bytes anywhere in the source produce non-well-formed XML that PowerPoint
+/// refuses to open.
 pub fn xml_escape(s: &str) -> String {
     let cleaned: String = s
         .chars()
@@ -838,12 +845,10 @@ pub fn xml_escape(s: &str) -> String {
 
 // ── Static XML templates ────────────────────────────────────────────────────
 
-/// Builds [Content_Types].xml with an Override entry for every slide part
-/// and (when present) every notesSlide part actually written to the
-/// package, plus Default entries for whichever image extensions are used.
-/// The previous version of this function was a `const` that only ever
-/// declared `slide1.xml`, so any deck with 2+ slides produced an invalid
-/// OPC package (undeclared parts) that PowerPoint/LibreOffice reject.
+/// [Content_Types].xml must declare an Override for every slide/notesSlide
+/// part actually written and a Default for every image extension actually
+/// used — this used to be a `const` listing only `slide1.xml`, which made
+/// any 2+ slide deck an invalid OPC package (undeclared parts).
 fn content_types_xml(
     slide_count: usize,
     notes_flags: &[bool],
@@ -867,23 +872,12 @@ fn content_types_xml(
         ))
         .collect();
 
-    let has_any_notes = notes_flags.iter().any(|b| *b);
-    let notes_master_override = if has_any_notes {
+    let notes_master_override = if notes_flags.iter().any(|b| *b) {
         r#"<Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>"#
-    } else {
-        ""
-    };
+    } else { "" };
 
-    let png_default = if any_png {
-        r#"<Default Extension="png" ContentType="image/png"/>"#
-    } else {
-        ""
-    };
-    let jpeg_default = if any_jpeg {
-        r#"<Default Extension="jpeg" ContentType="image/jpeg"/>"#
-    } else {
-        ""
-    };
+    let png_default = if any_png { r#"<Default Extension="png" ContentType="image/png"/>"# } else { "" };
+    let jpeg_default = if any_jpeg { r#"<Default Extension="jpeg" ContentType="image/jpeg"/>"# } else { "" };
 
     format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -901,11 +895,9 @@ fn content_types_xml(
   {slide_overrides}
   {notes_overrides}
 </Types>"#,
-        png_default = png_default,
-        jpeg_default = jpeg_default,
+        png_default = png_default, jpeg_default = jpeg_default,
         notes_master_override = notes_master_override,
-        slide_overrides = slide_overrides,
-        notes_overrides = notes_overrides,
+        slide_overrides = slide_overrides, notes_overrides = notes_overrides,
     )
 }
 
