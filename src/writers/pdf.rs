@@ -3,7 +3,9 @@
 //!  2. Built-in:   `printpdf` with embedded Helvetica (feature = "pdf")
 //!  3. Fallback:   helpful error with instructions
 
-use anyhow::{bail, Result};
+use anyhow::Result;
+#[cfg(not(feature = "pdf"))]
+use crate::error::RudocError;
 use crate::ir::doc::DocIR;
 use crate::writers::typst_writer;
 
@@ -23,12 +25,7 @@ pub fn render(doc: &DocIR, paper: &str, font: &str) -> Result<Vec<u8>> {
 
     // Strategy 3: helpful error
     #[cfg(not(feature = "pdf"))]
-    bail!(
-        "PDF output requires either:\n\
-         • Install typst on your PATH: https://typst.app (recommended, best quality)\n\
-         • Rebuild rudoc with PDF built-in: cargo build --features pdf\n\
-         • Convert to .typ first then run typst manually: rudoc input.md output.typ"
-    )
+    return Err(RudocError::PdfNotCompiled.into());
 }
 
 /// Try to call the `typst` CLI using properly unique temp file paths.
