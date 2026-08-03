@@ -32,26 +32,14 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            rust-targets: x86_64-unknown-linux-musl
-            use-cross: true
-            asset-name: rudoc-linux-x86_64.tar.gz
-            binary-path: target/x86_64-unknown-linux-musl/release/rudoc
-            
-          - os: ubuntu-latest
-            target: x86_64-pc-windows-gnu
-            rust-targets: x86_64-pc-windows-gnu
-            use-cross: true
-            asset-name: rudoc-windows-x86_64.zip
-            binary-path: target/x86_64-pc-windows-gnu/release/rudoc.exe
-            
-          - os: macos-latest
-            target: universal-apple-darwin
-            rust-targets: "x86_64-apple-darwin,aarch64-apple-darwin"
-            use-cross: false
-            asset-name: rudoc-macos-universal.tar.gz
-            binary-path: rudoc-macos-universal
+          # Linux x86_64 (static musl via cross)
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, use-cross: true, asset-name: rudoc-linux-x86_64.tar.gz, binary-path: target/x86_64-unknown-linux-musl/release/rudoc }
+          # Linux ARM64 (static musl via cross)
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, use-cross: true, asset-name: rudoc-linux-aarch64.tar.gz, binary-path: target/aarch64-unknown-linux-musl/release/rudoc }
+          # Windows x86_64 (via cross to avoid MSVC dyn-link issues if wanted, or native)
+          - { os: ubuntu-latest, target: x86_64-pc-windows-gnu, use-cross: true, asset-name: rudoc-windows-x86_64.zip, binary-path: target/x86_64-pc-windows-gnu/release/rudoc.exe }
+          # macOS (Apple Silicon & Intel dual build for universal)
+          - { os: macos-latest, target: universal-apple-darwin, use-cross: false, asset-name: rudoc-macos-universal.tar.gz, binary-path: rudoc-macos-universal }
 
     steps:
       - name: Checkout source code
@@ -60,11 +48,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.job.rust-targets }}
+          targets: ${{ matrix.job.target == 'universal-apple-darwin' && 'x86_64-apple-darwin aarch64-apple-darwin' || matrix.job.target }}
 
       - name: Install Cross
         if: matrix.job.use-cross
-        run: cargo install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build with Cross
         if: matrix.job.use-cross
@@ -95,7 +83,7 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-assets-${{ matrix.job.target }}
+          name: release-assets
           path: ${{ matrix.job.asset-name }}
 
   publish-release:
@@ -106,9 +94,8 @@ jobs:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: release-assets-*
+          name: release-assets
           path: ./assets
-          merge-multiple: true
 
       - name: Display structure of downloaded files
         run: ls -R ./assets
