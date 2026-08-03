@@ -1,10 +1,18 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::detect::{Format, IrTier};
 use crate::error::RudocError;
 use crate::ir::doc::DocIR;
 use crate::ir::slide::SlideIR;
 use crate::{readers, writers};
+
+/// Validates `input` as UTF-8 for a text-based `format`, producing a
+/// `RudocError::InvalidUtf8` (exit code 65/DATA_ERR) instead of a generic
+/// error on failure — this one helper covers every text-format reader
+/// below instead of each repeating its own ad-hoc `std::str::from_utf8`.
+fn require_utf8(input: &[u8], format: Format) -> Result<&str> {
+    std::str::from_utf8(input).map_err(|_| RudocError::InvalidUtf8 { format }.into())
+}
 
 /// All user-facing options that affect conversion.
 #[derive(Debug, Clone)]
@@ -82,7 +90,7 @@ pub fn convert(input: Input, opts: &ConvertOptions) -> Result<Vec<u8>> {
             let bytes = input_to_bytes(input);
             convert_tree(&bytes, from, to, opts)
         }
-        IrTier::Slide => bail!("Direct pptx → pptx conversion is a no-op"),
+        IrTier::Slide => return Err(RudocError::UnsupportedConversion { from, to }.into()),
     }
 }
 
@@ -103,7 +111,7 @@ fn input_to_doc(input: Input, opts: &ConvertOptions) -> Result<DocIR> {
 fn parse_doc(input: &[u8], from: Format) -> Result<DocIR> {
     match from {
         Format::Markdown => {
-            let src = std::str::from_utf8(input)?;
+            let src = require_utf8(input, from)?;
             let mut doc = readers::markdown::parse(src)?;
             if doc.metadata.title.is_none() {
                 doc.metadata.title = readers::markdown::extract_title(src);
@@ -111,22 +119,19 @@ fn parse_doc(input: &[u8], from: Format) -> Result<DocIR> {
             Ok(doc)
         }
         Format::Html => {
-            let src = std::str::from_utf8(input)?;
+            let src = require_utf8(input, from)?;
             readers::html::parse(src)
         }
         Format::Txt => {
-            let src = std::str::from_utf8(input)?;
+            let src = require_utf8(input, from)?;
             readers::txt::parse(src)
         }
         Format::Docx => readers::docx::parse(input),
         Format::Typst => {
-            let src = std::str::from_utf8(input)?;
+            let src = require_utf8(input, from)?;
             readers::typst_reader::parse(src)
         }
-        Format::Pdf => bail!(
-            "PDF reading (text extraction) is not yet implemented in this build.\n\
-             Tip: use a .typ or .md source file instead."
-        ),
+        Format::Pdf => Err(RudocError::PdfReadNotImplemented.into()),
         _ => bail!("Unexpected format in doc tier: {}", from),
     }
 }
@@ -166,7 +171,7 @@ fn convert_doc_ir(doc: DocIR, to: Format, opts: &ConvertOptions) -> Result<Vec<u
 fn convert_table(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
     let table = match from {
         Format::Csv => {
-            let src = std::str::from_utf8(input)?;
+            let src = require_utf8(input, from)?;
             readers::csv::parse(src, &opts.sheet_name)?
         }
         Format::Xlsx => readers::xlsx::parse(input, None)?,
@@ -192,7 +197,7 @@ fn convert_table(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) 
 // ── Tree tier ─────────────────────────────────────────────────────────────
 
 fn convert_tree(input: &[u8], from: Format, to: Format, opts: &ConvertOptions) -> Result<Vec<u8>> {
-    let src = std::str::from_utf8(input)?;
+    let src = require_utf8(input, from)?;
     let tree = match from {
         Format::Xml  => readers::xml::parse(src)?,
         Format::Opml => readers::opml::parse(src)?,

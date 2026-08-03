@@ -1,5 +1,6 @@
 use std::path::Path;
-use anyhow::{bail, Result};
+use anyhow::Result;
+use crate::error::RudocError;
 
 /// Every format Rudoc understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,7 @@ impl Format {
             "xml" => Format::Xml,
             "opml" => Format::Opml,
             "json" => Format::Json,
-            other => bail!("Unknown format: '{}'. Run 'rudoc --help' for supported formats.", other),
+            other => return Err(RudocError::UnknownFormatName(other.to_string()).into()),
         })
     }
 
@@ -45,12 +46,7 @@ impl Format {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        Self::from_name(&ext).map_err(|_| {
-            anyhow::anyhow!(
-                "Cannot detect format from extension '.{}'. Use -f / -t to specify it explicitly.",
-                ext
-            )
-        })
+        Self::from_name(&ext).map_err(|_| RudocError::UnknownFormatExtension(ext.clone()).into())
     }
 
     /// Canonical lowercase name (used in messages and as default file extension).
