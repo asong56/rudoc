@@ -23,7 +23,7 @@ pub fn parse(src: &str) -> Result<TreeNode> {
                     let key = std::str::from_utf8(attr.key.as_ref())
                         .unwrap_or("")
                         .to_string();
-                    let val = attr.unescape_value()
+                    let val = attr.decode_and_unescape_value(&reader)
                         .map(|v| v.to_string())
                         .unwrap_or_default();
                     node.attrs.insert(key, val);
@@ -48,7 +48,7 @@ pub fn parse(src: &str) -> Result<TreeNode> {
                     let key = std::str::from_utf8(attr.key.as_ref())
                         .unwrap_or("")
                         .to_string();
-                    let val = attr.unescape_value()
+                    let val = attr.decode_and_unescape_value(&reader)
                         .map(|v| v.to_string())
                         .unwrap_or_default();
                     node.attrs.insert(key, val);
