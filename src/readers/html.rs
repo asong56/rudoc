@@ -22,13 +22,8 @@ fn walk_node(handle: &Handle, blocks: &mut Vec<Block>, meta: &mut Metadata) {
                 walk_node(child, blocks, meta);
             }
         }
-        NodeData::Element { name, attrs, .. } => {
+        NodeData::Element { name, .. } => {
             let tag = name.local.as_ref().to_lowercase();
-            let _attrs_map: std::collections::HashMap<String, String> = attrs
-                .borrow()
-                .iter()
-                .map(|a| (a.name.local.as_ref().to_lowercase(), a.value.to_string()))
-                .collect();
 
             match tag.as_str() {
                 "html" | "body" | "div" | "article" | "section" | "main" | "header"
