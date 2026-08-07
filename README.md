@@ -29,10 +29,8 @@ Rudoc covers the 80% use-case: rich-text ↔ rich-text, spreadsheets, and struct
 | Platform | Binary |
 |---|---|
 | Linux x86\_64 (static musl) | `rudoc-linux-x86_64.tar.gz` |
-| Linux ARM64 (static musl) | `rudoc-linux-aarch64.tar.gz` |
 | Windows x86\_64 | `rudoc-windows-x86_64.zip` |
-| macOS Apple Silicon | `rudoc-macos-aarch64.tar.gz` |
-| macOS Intel | `rudoc-macos-x86_64.tar.gz` |
+| macOS Apple Silicon | `rudoc-macos-arm64.tar.gz` |
 
 Download from [Releases](https://github.com/asong56/rudoc/releases), extract, and place on your `PATH`.
 
