@@ -1,6 +1,6 @@
 # Rudoc
 
-**Fast, dependency-free document converter** — a smaller tool for simple convertion workflow.
+**Fast, dependency-free document converter** — a smaller tool for simple conversion workflow.
 
 [![Release](https://img.shields.io/github/v/release/asong56/rudoc)](https://github.com/asong56/rudoc/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)

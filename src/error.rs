@@ -61,7 +61,7 @@ pub enum RudocError {
              • Convert to .typ first then run typst manually: rudoc input.md output.typ")]
     PdfNotCompiled,
 
-    #[error("Input file not found: {0:?}")]
+    #[error("Input file not found: {0:?}\nHint: check the path, or run 'rudoc --help' for usage.")]
     InputNotFound(std::path::PathBuf),
 
     #[error("Failed to read '{path:?}': {source}")]
