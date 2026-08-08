@@ -5,7 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 
-<video src="https://github.com/asong56/rudoc/blob/main/assets/demo.webm" controls></video>
+[demo.webm](https://github.com/user-attachments/assets/c70c9286-1500-4c48-ba52-1250f0658311)
+
 ---
 
 ## Why Rudoc?
