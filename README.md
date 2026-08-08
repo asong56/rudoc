@@ -222,17 +222,6 @@ lipo -create \
   -output rudoc-macos-universal
 ```
 
-### GitHub Actions
-
-Push a version tag to trigger the full release pipeline:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-This builds and releases binaries for all 6 platform/arch combinations automatically.
-
 ---
 
 ## Architecture
@@ -243,3 +232,6 @@ SlideIR ──── writers for: pptx  (derived from DocIR by heading-split)
 TableIR ──── readers/writers for: csv, xlsx
 TreeIR ───── readers/writers for: xml, opml, json (lossless round-trips)
 ```
+
+## Plan
+1. *Delete .bmp support, add webp*
