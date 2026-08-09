@@ -181,6 +181,18 @@ fn collect_inlines(handle: &Handle, out: &mut Vec<Inline>) {
                     let text = extract_text(handle);
                     out.push(Inline::Code(text));
                 }
+                "sup" => {
+                    let inner = node_to_inlines(handle);
+                    if !inner.is_empty() {
+                        out.push(Inline::Superscript(inner));
+                    }
+                }
+                "sub" => {
+                    let inner = node_to_inlines(handle);
+                    if !inner.is_empty() {
+                        out.push(Inline::Subscript(inner));
+                    }
+                }
                 "a" => {
                     let attrs_b = attrs.borrow();
                     let url = attrs_b

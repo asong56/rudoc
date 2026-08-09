@@ -47,6 +47,8 @@ pub enum Inline {
     Emph(Vec<Inline>),
     Strong(Vec<Inline>),
     Strikethrough(Vec<Inline>),
+    Superscript(Vec<Inline>),
+    Subscript(Vec<Inline>),
     Code(String),
     Link {
         url: String,
@@ -130,7 +132,11 @@ fn block_to_text(block: &Block, out: &mut String) {
 pub fn inline_to_text(il: &Inline, out: &mut String) {
     match il {
         Inline::Text(s) => out.push_str(s),
-        Inline::Emph(inner) | Inline::Strong(inner) | Inline::Strikethrough(inner) => {
+        Inline::Emph(inner)
+        | Inline::Strong(inner)
+        | Inline::Strikethrough(inner)
+        | Inline::Superscript(inner)
+        | Inline::Subscript(inner) => {
             for i in inner {
                 inline_to_text(i, out);
             }
@@ -147,8 +153,20 @@ pub fn inline_to_text(il: &Inline, out: &mut String) {
             }
         }
         Inline::LineBreak | Inline::SoftBreak => out.push('\n'),
-        Inline::RawInline { content, .. } => out.push_str(content),
+        Inline::RawInline { content, .. } => {
+            if !is_html_comment(content) {
+                out.push_str(content);
+            }
+        }
     }
+}
+
+/// True if `content` is (only) an HTML comment `<!-- ... -->`. Comments
+/// carry no visible meaning in rendered output (docx/pptx/txt/typst/etc.)
+/// and must never leak into those formats as literal text.
+pub fn is_html_comment(content: &str) -> bool {
+    let t = content.trim();
+    t.starts_with("<!--") && t.ends_with("-->")
 }
 
 /// Public wrapper around block_to_text for use by other modules.

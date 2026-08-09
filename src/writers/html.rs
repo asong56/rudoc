@@ -172,6 +172,16 @@ fn render_inline(il: &Inline, out: &mut String) {
             out.push_str(&format!("<img src=\"{}\" alt=\"{}\">",
                 escape_attr(src), escape_html(&alt_text)));
         }
+        Inline::Superscript(inner) => {
+            out.push_str("<sup>");
+            render_inlines(inner, out);
+            out.push_str("</sup>");
+        }
+        Inline::Subscript(inner) => {
+            out.push_str("<sub>");
+            render_inlines(inner, out);
+            out.push_str("</sub>");
+        }
         Inline::LineBreak => out.push_str("<br>\n"),
         Inline::SoftBreak => out.push('\n'),
         Inline::RawInline { format, content } if format == "html" => out.push_str(content),

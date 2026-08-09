@@ -17,6 +17,9 @@ pub fn render(doc: &DocIR, wrap_cols: Option<usize>) -> String {
         if let Some(d) = &doc.metadata.date {
             out.push_str(&format!("date: \"{}\"\n", d));
         }
+        if let Some(l) = &doc.metadata.lang {
+            out.push_str(&format!("lang: \"{}\"\n", l));
+        }
         out.push_str("---\n\n");
     }
 
@@ -170,6 +173,16 @@ fn render_inline(il: &Inline, out: &mut String) {
             out.push_str("](");
             out.push_str(src);
             out.push(')');
+        }
+        Inline::Superscript(inner) => {
+            out.push('^');
+            render_inlines(inner, out);
+            out.push('^');
+        }
+        Inline::Subscript(inner) => {
+            out.push('~');
+            render_inlines(inner, out);
+            out.push('~');
         }
         Inline::LineBreak => out.push_str("  \n"),
         Inline::SoftBreak => out.push(' '),

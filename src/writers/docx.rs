@@ -128,46 +128,54 @@ fn add_block(docx: Docx, block: &Block, num_id: usize) -> Result<(Docx, usize)> 
                 Paragraph::new().add_run(Run::new().add_text("─".repeat(40)))
             )
         }
-        Block::RawBlock { content, .. } => {
-            docx.add_paragraph(Paragraph::new().add_run(Run::new().add_text(content)))
+        Block::RawBlock { format, content } => {
+            if format == "yaml" || crate::ir::doc::is_html_comment(content) {
+                docx
+            } else {
+                docx.add_paragraph(Paragraph::new().add_run(Run::new().add_text(content)))
+            }
         }
     };
     Ok((docx, num_id))
 }
 
+/// Accumulated character formatting for a run, tracked while walking nested
+/// inlines (e.g. `**bold *and italic***`) so combinations are preserved
+/// instead of only the outermost style surviving.
+#[derive(Clone, Copy, Default)]
+struct RunStyle {
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    code: bool,
+    vert_align: Option<VertAlignType>,
+}
+
 fn add_inlines_to_para(mut para: Paragraph, inlines: &[Inline]) -> Paragraph {
-    for il in inlines { para = add_inline_to_para(para, il); }
+    for il in inlines {
+        para = add_inline_to_para(para, il, RunStyle::default());
+    }
     para
 }
 
-fn add_inline_to_para(para: Paragraph, il: &Inline) -> Paragraph {
+fn add_inline_to_para(para: Paragraph, il: &Inline, style: RunStyle) -> Paragraph {
     match il {
-        Inline::Text(t) => para.add_run(Run::new().add_text(t)),
-        Inline::Strong(inner) => {
-            let mut t = String::new();
-            for i in inner { crate::ir::doc::inline_to_text(i, &mut t); }
-            para.add_run(Run::new().add_text(&t).bold())
+        Inline::Text(t) => para.add_run(styled_run(t, style)),
+        Inline::Strong(inner) => add_inlines_styled(para, inner, RunStyle { bold: true, ..style }),
+        Inline::Emph(inner) => add_inlines_styled(para, inner, RunStyle { italic: true, ..style }),
+        Inline::Strikethrough(inner) => add_inlines_styled(para, inner, RunStyle { strike: true, ..style }),
+        Inline::Superscript(inner) => {
+            add_inlines_styled(para, inner, RunStyle { vert_align: Some(VertAlignType::Superscript), ..style })
         }
-        Inline::Emph(inner) => {
-            let mut t = String::new();
-            for i in inner { crate::ir::doc::inline_to_text(i, &mut t); }
-            para.add_run(Run::new().add_text(&t).italic())
+        Inline::Subscript(inner) => {
+            add_inlines_styled(para, inner, RunStyle { vert_align: Some(VertAlignType::Subscript), ..style })
         }
-        Inline::Strikethrough(inner) => {
-            let mut t = String::new();
-            for i in inner { crate::ir::doc::inline_to_text(i, &mut t); }
-            para.add_run(Run::new().add_text(format!("~~{}~~", t)))
-        }
-        Inline::Code(s) => {
-            para.add_run(
-                Run::new().add_text(s).fonts(RunFonts::new().ascii("Courier New"))
-            )
-        }
+        Inline::Code(s) => para.add_run(styled_run(s, RunStyle { code: true, ..style })),
         Inline::Link { url, content, .. } => {
-            let mut t = String::new();
-            for i in content { crate::ir::doc::inline_to_text(i, &mut t); }
-            let hl = Hyperlink::new(url, HyperlinkType::External)
-                .add_run(Run::new().add_text(&t));
+            let mut hl = Hyperlink::new(url, HyperlinkType::External);
+            for i in content {
+                hl = add_run_to_hyperlink(hl, i, style);
+            }
             para.add_hyperlink(hl)
         }
         Inline::Image { src, alt } => {
@@ -184,8 +192,59 @@ fn add_inline_to_para(para: Paragraph, il: &Inline) -> Paragraph {
         }
         Inline::LineBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
         Inline::SoftBreak => para.add_run(Run::new().add_text(" ")),
-        Inline::RawInline { content, .. } => para.add_run(Run::new().add_text(content)),
+        Inline::RawInline { content, .. } => {
+            if crate::ir::doc::is_html_comment(content) {
+                para
+            } else {
+                para.add_run(styled_run(content, style))
+            }
+        }
     }
+}
+
+fn add_inlines_styled(mut para: Paragraph, inlines: &[Inline], style: RunStyle) -> Paragraph {
+    for il in inlines {
+        para = add_inline_to_para(para, il, style);
+    }
+    para
+}
+
+fn add_run_to_hyperlink(hl: Hyperlink, il: &Inline, style: RunStyle) -> Hyperlink {
+    match il {
+        Inline::Text(t) => hl.add_run(styled_run(t, style)),
+        Inline::Strong(inner) => add_runs_to_hyperlink(hl, inner, RunStyle { bold: true, ..style }),
+        Inline::Emph(inner) => add_runs_to_hyperlink(hl, inner, RunStyle { italic: true, ..style }),
+        Inline::Strikethrough(inner) => add_runs_to_hyperlink(hl, inner, RunStyle { strike: true, ..style }),
+        Inline::Superscript(inner) => {
+            add_runs_to_hyperlink(hl, inner, RunStyle { vert_align: Some(VertAlignType::Superscript), ..style })
+        }
+        Inline::Subscript(inner) => {
+            add_runs_to_hyperlink(hl, inner, RunStyle { vert_align: Some(VertAlignType::Subscript), ..style })
+        }
+        Inline::Code(s) => hl.add_run(styled_run(s, RunStyle { code: true, ..style })),
+        other => {
+            let mut t = String::new();
+            crate::ir::doc::inline_to_text(other, &mut t);
+            if t.is_empty() { hl } else { hl.add_run(styled_run(&t, style)) }
+        }
+    }
+}
+
+fn add_runs_to_hyperlink(mut hl: Hyperlink, inlines: &[Inline], style: RunStyle) -> Hyperlink {
+    for il in inlines {
+        hl = add_run_to_hyperlink(hl, il, style);
+    }
+    hl
+}
+
+fn styled_run(text: &str, style: RunStyle) -> Run {
+    let mut run = Run::new().add_text(text);
+    if style.bold { run = run.bold(); }
+    if style.italic { run = run.italic(); }
+    if style.strike { run = run.strike(); }
+    if style.code { run = run.fonts(RunFonts::new().ascii("Courier New")); }
+    if let Some(va) = style.vert_align { run = run.vert_align(va); }
+    run
 }
 
 fn try_embed_image(src: &str) -> Option<Vec<u8>> {

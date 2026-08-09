@@ -5,6 +5,9 @@ use std::io::Read;
 
 use crate::ir::doc::{Block, DocIR, Inline};
 
+#[derive(PartialEq, Clone, Copy)]
+enum VertAlign { None, Superscript, Subscript }
+
 pub fn parse(bytes: &[u8]) -> Result<DocIR> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor).context("Not a valid DOCX (ZIP) file")?;
@@ -40,6 +43,7 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
     let mut run_italic = false;
     let mut run_strike = false;
     let mut run_code   = false;
+    let mut run_vert_align = VertAlign::None;
     let mut para_style = String::new();
 
     loop {
@@ -65,6 +69,17 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                     "w:b"  if in_rPr => run_bold   = true,
                     "w:i"  if in_rPr => run_italic  = true,
                     "w:strike" | "w:dstrike" if in_rPr => run_strike = true,
+                    "w:vertAlign" if in_rPr => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"w:val" {
+                                run_vert_align = match attr.value.as_ref() {
+                                    b"superscript" => VertAlign::Superscript,
+                                    b"subscript" => VertAlign::Subscript,
+                                    _ => VertAlign::None,
+                                };
+                            }
+                        }
+                    }
                     "w:rStyle" if in_rPr => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"w:val" {
@@ -100,12 +115,18 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                             if run_strike && !run_code {
                                 inline = Inline::Strikethrough(vec![inline]);
                             }
+                            match run_vert_align {
+                                VertAlign::Superscript => inline = Inline::Superscript(vec![inline]),
+                                VertAlign::Subscript => inline = Inline::Subscript(vec![inline]),
+                                VertAlign::None => {}
+                            }
                             current_inlines.push(inline);
                         }
                         run_bold   = false;
                         run_italic = false;
                         run_strike = false;
                         run_code   = false;
+                        run_vert_align = VertAlign::None;
                     }
                     "w:p" => {
                         if in_para {
@@ -141,6 +162,18 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                     }
                     "w:b"  if in_rPr => { run_bold   = true; }
                     "w:i"  if in_rPr => { run_italic  = true; }
+                    "w:strike" | "w:dstrike" if in_rPr => { run_strike = true; }
+                    "w:vertAlign" if in_rPr => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"w:val" {
+                                run_vert_align = match attr.value.as_ref() {
+                                    b"superscript" => VertAlign::Superscript,
+                                    b"subscript" => VertAlign::Subscript,
+                                    _ => VertAlign::None,
+                                };
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
