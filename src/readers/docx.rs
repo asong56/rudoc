@@ -35,8 +35,8 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
 
     // State
     let mut in_para      = false;
-    let mut in_pPr       = false; // inside <w:pPr>
-    let mut in_rPr       = false; // inside <w:rPr>
+    let mut in_p_pr       = false; // inside <w:pPr>
+    let mut in_r_pr       = false; // inside <w:rPr>
     let mut current_inlines: Vec<Inline> = Vec::new();
     let mut current_run_text = String::new();
     let mut run_bold   = false;
@@ -56,20 +56,20 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                         current_inlines.clear();
                         para_style.clear();
                     }
-                    "w:pPr" => { in_pPr = true; }
-                    "w:rPr" => { in_rPr = true; }
+                    "w:pPr" => { in_p_pr = true; }
+                    "w:rPr" => { in_r_pr = true; }
                     // pStyle lives inside w:pPr — only capture it there
-                    "w:pStyle" if in_pPr => {
+                    "w:pStyle" if in_p_pr => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"w:val" {
                                 para_style = String::from_utf8_lossy(&attr.value).to_string();
                             }
                         }
                     }
-                    "w:b"  if in_rPr => run_bold   = true,
-                    "w:i"  if in_rPr => run_italic  = true,
-                    "w:strike" | "w:dstrike" if in_rPr => run_strike = true,
-                    "w:vertAlign" if in_rPr => {
+                    "w:b"  if in_r_pr => run_bold   = true,
+                    "w:i"  if in_r_pr => run_italic  = true,
+                    "w:strike" | "w:dstrike" if in_r_pr => run_strike = true,
+                    "w:vertAlign" if in_r_pr => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"w:val" {
                                 run_vert_align = match attr.value.as_ref() {
@@ -80,7 +80,7 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                             }
                         }
                     }
-                    "w:rStyle" if in_rPr => {
+                    "w:rStyle" if in_r_pr => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"w:val" {
                                 let style = String::from_utf8_lossy(&attr.value).to_string();
@@ -96,8 +96,8 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
             Ok(XmlEvent::End(ref e)) => {
                 let name = std::str::from_utf8(e.name().as_ref()).unwrap_or("").to_string();
                 match name.as_str() {
-                    "w:pPr" => { in_pPr = false; }
-                    "w:rPr" => { in_rPr = false; }
+                    "w:pPr" => { in_p_pr = false; }
+                    "w:rPr" => { in_r_pr = false; }
                     "w:r" => {
                         if !current_run_text.is_empty() {
                             let text = std::mem::take(&mut current_run_text);
@@ -136,7 +136,7 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                                 blocks.push(block);
                             }
                             in_para = false;
-                            in_pPr  = false;
+                            in_p_pr  = false;
                         }
                     }
                     "w:body" => break,
@@ -144,7 +144,7 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                 }
             }
             Ok(XmlEvent::Text(ref e)) => {
-                if in_para && !in_pPr {
+                if in_para && !in_p_pr {
                     current_run_text.push_str(&e.unescape().unwrap_or_default());
                 }
             }
@@ -153,17 +153,17 @@ fn parse_document_xml(xml: &str, doc: &mut DocIR) -> Result<()> {
                 match name.as_str() {
                     "w:br" => { current_inlines.push(Inline::LineBreak); }
                     // Self-closing pStyle (some exporters emit it this way)
-                    "w:pStyle" if in_pPr => {
+                    "w:pStyle" if in_p_pr => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"w:val" {
                                 para_style = String::from_utf8_lossy(&attr.value).to_string();
                             }
                         }
                     }
-                    "w:b"  if in_rPr => { run_bold   = true; }
-                    "w:i"  if in_rPr => { run_italic  = true; }
-                    "w:strike" | "w:dstrike" if in_rPr => { run_strike = true; }
-                    "w:vertAlign" if in_rPr => {
+                    "w:b"  if in_r_pr => { run_bold   = true; }
+                    "w:i"  if in_r_pr => { run_italic  = true; }
+                    "w:strike" | "w:dstrike" if in_r_pr => { run_strike = true; }
+                    "w:vertAlign" if in_r_pr => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"w:val" {
                                 run_vert_align = match attr.value.as_ref() {

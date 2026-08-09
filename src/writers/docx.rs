@@ -148,7 +148,8 @@ struct RunStyle {
     italic: bool,
     strike: bool,
     code: bool,
-    vert_align: Option<VertAlignType>,
+    superscript: bool,
+    subscript: bool,
 }
 
 fn add_inlines_to_para(mut para: Paragraph, inlines: &[Inline]) -> Paragraph {
@@ -165,10 +166,10 @@ fn add_inline_to_para(para: Paragraph, il: &Inline, style: RunStyle) -> Paragrap
         Inline::Emph(inner) => add_inlines_styled(para, inner, RunStyle { italic: true, ..style }),
         Inline::Strikethrough(inner) => add_inlines_styled(para, inner, RunStyle { strike: true, ..style }),
         Inline::Superscript(inner) => {
-            add_inlines_styled(para, inner, RunStyle { vert_align: Some(VertAlignType::SuperScript), ..style })
+            add_inlines_styled(para, inner, RunStyle { superscript: true, ..style })
         }
         Inline::Subscript(inner) => {
-            add_inlines_styled(para, inner, RunStyle { vert_align: Some(VertAlignType::SubScript), ..style })
+            add_inlines_styled(para, inner, RunStyle { subscript: true, ..style })
         }
         Inline::Code(s) => para.add_run(styled_run(s, RunStyle { code: true, ..style })),
         Inline::Link { url, content, .. } => {
@@ -216,10 +217,10 @@ fn add_run_to_hyperlink(hl: Hyperlink, il: &Inline, style: RunStyle) -> Hyperlin
         Inline::Emph(inner) => add_runs_to_hyperlink(hl, inner, RunStyle { italic: true, ..style }),
         Inline::Strikethrough(inner) => add_runs_to_hyperlink(hl, inner, RunStyle { strike: true, ..style }),
         Inline::Superscript(inner) => {
-            add_runs_to_hyperlink(hl, inner, RunStyle { vert_align: Some(VertAlignType::SuperScript), ..style })
+            add_runs_to_hyperlink(hl, inner, RunStyle { superscript: true, ..style })
         }
         Inline::Subscript(inner) => {
-            add_runs_to_hyperlink(hl, inner, RunStyle { vert_align: Some(VertAlignType::SubScript), ..style })
+            add_runs_to_hyperlink(hl, inner, RunStyle { subscript: true, ..style })
         }
         Inline::Code(s) => hl.add_run(styled_run(s, RunStyle { code: true, ..style })),
         other => {
@@ -239,11 +240,15 @@ fn add_runs_to_hyperlink(mut hl: Hyperlink, inlines: &[Inline], style: RunStyle)
 
 fn styled_run(text: &str, style: RunStyle) -> Run {
     let mut run = Run::new().add_text(text);
-    if style.bold { run = run.bold(); }
-    if style.italic { run = run.italic(); }
-    if style.strike { run = run.strikethrough(); }
     if style.code { run = run.fonts(RunFonts::new().ascii("Courier New")); }
-    if let Some(va) = style.vert_align { run = run.vertical_align(va); }
+    // Build RunProperty once so fields don't overwrite each other.
+    let mut rp = RunProperty::new();
+    if style.bold        { rp = rp.bold(); }
+    if style.italic      { rp = rp.italic(); }
+    if style.strike      { rp = rp.strike(); }
+    if style.superscript { rp = rp.vert_align(VertAlignType::SuperScript); }
+    else if style.subscript { rp = rp.vert_align(VertAlignType::SubScript); }
+    run.run_property = rp;
     run
 }
 
