@@ -150,9 +150,23 @@ fn render_inline(il: &Inline, out: &mut String) {
             for il in alt { crate::ir::doc::inline_to_text(il, &mut alt_text); }
             out.push_str(&format!("#image(\"{}\", alt: \"{}\")", escape_typ(src), escape_typ(&alt_text)));
         }
+        Inline::Superscript(inner) => {
+            out.push_str("#super[");
+            render_inlines(inner, out);
+            out.push(']');
+        }
+        Inline::Subscript(inner) => {
+            out.push_str("#sub[");
+            render_inlines(inner, out);
+            out.push(']');
+        }
         Inline::LineBreak => out.push_str("\\\n"),
         Inline::SoftBreak => out.push(' '),
-        Inline::RawInline { content, .. } => out.push_str(content),
+        Inline::RawInline { content, .. } => {
+            if !crate::ir::doc::is_html_comment(content) {
+                out.push_str(content);
+            }
+        }
     }
 }
 

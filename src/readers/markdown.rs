@@ -4,20 +4,106 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
 use crate::ir::doc::{Block, DocIR, Inline};
 
 pub fn parse(src: &str) -> Result<DocIR> {
+    let (frontmatter, body) = split_frontmatter(src);
+
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_SMART_PUNCTUATION);
 
-    let events: Vec<Event> = Parser::new_ext(src, opts).collect();
+    let events: Vec<Event> = Parser::new_ext(body, opts).collect();
     let mut doc = DocIR::new();
     let mut ctx = ParseCtx::default();
 
     for event in events {
         process_event(event, &mut ctx, &mut doc);
     }
+
+    if let Some(fm) = frontmatter {
+        apply_frontmatter(&fm, &mut doc);
+    }
+
     Ok(doc)
+}
+
+/// Split a leading YAML frontmatter block (`---\n ... \n---`) off the
+/// source. Without this, the frontmatter lines are fed to the Markdown
+/// parser itself, which mangles them into paragraphs/rules instead of
+/// metadata. Returns (frontmatter_text, remaining_body).
+fn split_frontmatter(src: &str) -> (Option<String>, &str) {
+    let stripped = src.strip_prefix('\u{feff}').unwrap_or(src);
+    let leading_ws_len = stripped.len() - stripped.trim_start().len();
+    let after_ws = &stripped[leading_ws_len..];
+
+    if !after_ws.starts_with("---") { return (None, src); }
+    // The delimiter line must be exactly "---" (optionally trailing spaces).
+    let rest = &after_ws[3..];
+    let rest = match rest.split_once('\n') {
+        Some((first_line_rest, tail)) if first_line_rest.trim().is_empty() => tail,
+        _ => return (None, src),
+    };
+
+    // Find the closing "---" or "..." delimiter on its own line.
+    let mut byte_off = 0usize;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim();
+        if trimmed == "---" || trimmed == "..." {
+            let fm_text = &rest[..byte_off];
+            let body_start_in_rest = byte_off + line.len();
+            let body_start = (after_ws.len() - rest.len()) + body_start_in_rest;
+            let body = &after_ws[body_start..];
+            return (Some(fm_text.to_string()), body);
+        }
+        byte_off += line.len();
+    }
+    (None, src)
+}
+
+/// Minimal, dependency-free YAML scalar parser for `key: value` frontmatter.
+/// Handles the common Pandoc-style keys plus arbitrary custom keys (kept as
+/// raw text via a `RawBlock` so round-tripping through Markdown preserves
+/// them even though the doc IR has no generic metadata bag).
+fn apply_frontmatter(fm: &str, doc: &mut DocIR) {
+    let mut extra: Vec<(String, String)> = Vec::new();
+    for line in fm.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() { continue; }
+        let Some((key, val)) = line.split_once(':') else { continue };
+        let key = key.trim();
+        // Skip nested/list entries (indented or starting with '-'); this is
+        // a flat-scalar parser only.
+        if key.is_empty() || line.starts_with(' ') || line.starts_with('-') { continue; }
+        let val = unquote_yaml_scalar(val.trim());
+        match key {
+            "title" => doc.metadata.title = Some(val),
+            "author" => doc.metadata.author = Some(val),
+            "date" => doc.metadata.date = Some(val),
+            "lang" | "language" => doc.metadata.lang = Some(val),
+            _ => extra.push((key.to_string(), val)),
+        }
+    }
+    if !extra.is_empty() {
+        // Preserve unrecognised keys as a raw YAML block so a md→md
+        // round-trip doesn't silently drop them.
+        let mut content = String::from("---\n");
+        for (k, v) in &extra {
+            content.push_str(&format!("{}: \"{}\"\n", k, v.replace('"', "\\\"")));
+        }
+        content.push_str("---");
+        doc.blocks.insert(0, Block::RawBlock { format: "yaml".into(), content });
+    }
+}
+
+fn unquote_yaml_scalar(s: &str) -> String {
+    let s = s.trim();
+    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+    {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 #[derive(Default)]
@@ -220,6 +306,13 @@ fn process_event(event: Event<'_>, ctx: &mut ParseCtx, doc: &mut DocIR) {
         Event::HardBreak   => ctx.push_inline(Inline::LineBreak),
         Event::Html(h)     => ctx.push_inline(Inline::RawInline { format: "html".into(), content: h.to_string() }),
         Event::Rule        => ctx.push_block(Block::HorizontalRule, doc),
+        // GFM task list checkbox ("- [ ] foo" / "- [x] foo"). pulldown-cmark
+        // emits this as the first event inside the Item's inline run; render
+        // it as a literal "[x] "/"[ ] " prefix so it survives into every
+        // output format without needing a dedicated IR variant.
+        Event::TaskListMarker(checked) => {
+            ctx.push_inline(Inline::Text(if checked { "[x] ".into() } else { "[ ] ".into() }));
+        }
         _                  => {}
     }
 }

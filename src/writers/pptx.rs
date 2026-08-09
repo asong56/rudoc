@@ -659,6 +659,27 @@ fn inline_to_run(il: &Inline, out: &mut String) {
             out.push_str(&xml_escape(&text));
             out.push_str("</a:t></a:r>");
         }
+        Inline::Strikethrough(inner) => {
+            out.push_str("<a:r><a:rPr lang=\"en-US\" sz=\"1800\" strike=\"sngStrike\"/><a:t>");
+            let mut text = String::new();
+            for il in inner { crate::ir::doc::inline_to_text(il, &mut text); }
+            out.push_str(&xml_escape(&text));
+            out.push_str("</a:t></a:r>");
+        }
+        Inline::Superscript(inner) => {
+            out.push_str("<a:r><a:rPr lang=\"en-US\" sz=\"1800\" baseline=\"30000\"/><a:t>");
+            let mut text = String::new();
+            for il in inner { crate::ir::doc::inline_to_text(il, &mut text); }
+            out.push_str(&xml_escape(&text));
+            out.push_str("</a:t></a:r>");
+        }
+        Inline::Subscript(inner) => {
+            out.push_str("<a:r><a:rPr lang=\"en-US\" sz=\"1800\" baseline=\"-25000\"/><a:t>");
+            let mut text = String::new();
+            for il in inner { crate::ir::doc::inline_to_text(il, &mut text); }
+            out.push_str(&xml_escape(&text));
+            out.push_str("</a:t></a:r>");
+        }
         Inline::Code(s) => {
             out.push_str(&format!(
                 "<a:r><a:rPr lang=\"en-US\" sz=\"1600\"><a:latin typeface=\"Courier New\"/></a:rPr><a:t>{}</a:t></a:r>",
@@ -677,6 +698,7 @@ fn inline_to_run(il: &Inline, out: &mut String) {
         Inline::LineBreak | Inline::SoftBreak => {
             out.push_str("<a:br/>");
         }
+        Inline::RawInline { content, .. } if crate::ir::doc::is_html_comment(content) => {}
         other => {
             let mut text = String::new();
             crate::ir::doc::inline_to_text(other, &mut text);
