@@ -54,7 +54,7 @@ serde      = { version = "=1.0.196", features = ["derive"] }
 serde_json = "=1.0.113"
 indexmap   = "=2.2.6"
 
-zip = { version = "=0.6.6", default-features = false, features = ["deflate"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
 # gif/bmp cost nothing extra here: docx-rs already requires them transitively,
 # so the shared `image` build includes them regardless of this list. webp is
 # NOT required by any other dependency, so omitting it is a real size saving.
